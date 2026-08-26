@@ -1,3 +1,11 @@
+////////////////////////////////////////////////////////////////////////////////
+// 模块: design_top_i2s_test_single_pll_fix64  (独立测试顶层, 非主工程)
+// 功能: 验证 "I2S 测试音 -> HDMI 音频" 端到端链路(不含 TF/SD/BMP 图像).
+//       1kHz 方波测试音经 i2s_test_tone_gen -> I2S_receiver -> ACR 计算 ->
+//       HDMI 发送核 -> TMDS PHY, 输出 720p 彩条 + 音频.
+// 时钟: PLL_HDMI_AUDIO 由 50MHz 产生 74.25MHz(pixel)/371.25MHz(serial)/12.288MHz(audio).
+// 说明: 仅用于联调/自测, 主工程顶层是 top_tf_hdmi_audio.v.
+////////////////////////////////////////////////////////////////////////////////
 module design_top_i2s_test_single_pll_fix64 (
     input  wire I_sys_clk,
     input  wire I_key_in,

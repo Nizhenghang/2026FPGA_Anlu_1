@@ -1,3 +1,17 @@
+// ============================================================================
+// 文件：SD/bmp_read.v
+// 功能：BMP 文件扫描 + 解析 + 像素重组，输出 24bit RGB 给帧缓存
+// 两条主路径：
+//   (A) 上电扫描(scan_start)：从 scan_start_sector 顺序读扇区，
+//       检查 "BM" 头 + 分辨率(640x480) + 24bit + 无压缩，命中则记录起始扇区，
+//       最多找 SCAN_TARGET_COUNT 张(本工程=4)，结果由 sd_card_bmp 缓存
+//   (B) 加载(load_start)：按 load_sector 读 BMP 头 + 像素数据，
+//       跳过 54 字节文件头/信息头，把 BGR 字节拼成 24bit RGB(bmp_data)送出
+// 关键约束：header_match 强制 width==640 && height==480 && 24bit && 无压缩，
+//       即本工程只认固定分辨率 BMP（扩展"缩放适配"功能需改这里）
+// 状态机：ST_IDLE -> ST_SCAN(扫描) / ST_LOAD_HDR(读头) -> ST_LOAD_WAIT -> ST_LOAD_DATA(读像素)
+// 像素拼接：BMP 按 B,G,R 小端存储，sd_card_bmp 再重排为 {R,G,B,0} 写 SDRAM
+// ============================================================================
 module bmp_read(
     input                       clk,
     input                       rst,
@@ -65,6 +79,8 @@ wire [31:0] next_scan_sector_if_match;
 wire [31:0] next_scan_sector_if_miss;
 
 assign ready = (state == ST_IDLE);
+// 头部匹配：必须是 "BM" 标志 + 固定分辨率(640x480) + 24bit + 无压缩，
+// 否则本工程不认（扩展"缩放适配"功能需放宽此条件）
 assign header_match = (header_0 == "B") &&
                       (header_1 == "M") &&
                       (width[15:0]  == bmp_width) &&
@@ -102,8 +118,12 @@ always @(posedge clk or posedge rst) begin
         bit_count    <= 16'd0;
         compression  <= 32'd0;
     end else if (((state == ST_SCAN) || (state == ST_LOAD_HDR)) && sd_sec_read_data_valid) begin
-        case (rd_cnt)
-            10'd0 : header_0 <= sd_sec_read_data;
+            // 按 BMP 标准头部字段偏移解析(字节序 little-endian)：
+            //  0-1  = "BM" 标志;  2-5  = 文件总字节数;  10-13 = 像素数据起始偏移
+            //  18-21 = 宽(px);  22-25 = 高(px);  28-29 = 每像素位数(24=RGB)
+            //  30-33 = 压缩方式(0=BI_RGB 无压缩)
+            case (rd_cnt)
+            10'd0 : header_0 <= sd_sec_read_data;   // 字节0: 'B'
             10'd1 : header_1 <= sd_sec_read_data;
 
             10'd2 : file_len[7:0] <= sd_sec_read_data;
@@ -167,15 +187,15 @@ always @(posedge clk or posedge rst) begin
     end else if (state == ST_LOAD_DATA) begin
         if (bmp_data_valid) begin
             case (bmp_byte_idx)
-                2'd0: begin
+                2'd0: begin  // BMP 像素按 B,G,R 顺序存储：第1字节=B(蓝)
                     bmp_data_wr_en <= 1'b0;
                     bmp_data[7:0]  <= sd_sec_read_data;
                 end
-                2'd1: begin
+                2'd1: begin  // 第2字节=G(绿)
                     bmp_data_wr_en <= 1'b0;
                     bmp_data[15:8] <= sd_sec_read_data;
                 end
-                2'd2: begin
+                2'd2: begin  // 第3字节=R(红)：凑满 24bit {R,G,B}，本拍置 wr_en 送出
                     bmp_data_wr_en  <= 1'b1;
                     bmp_data[23:16] <= sd_sec_read_data;
                 end

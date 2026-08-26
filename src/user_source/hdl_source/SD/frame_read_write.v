@@ -1,4 +1,14 @@
 `timescale 1ns/1ps
+// ============================================================================
+// 文件：SD/frame_read_write.v
+// 功能：帧缓存读写仲裁顶层 —— 把"写通道(TF图)"和"读通道(视频显示)"桥接到 SDRAM 控制器
+// 结构：例化两个异步 FIFO + 两个状态机
+//   - 写通道：wfifo_32_32_512(异步FIFO, write_clk域) -> frame_fifo_write(突发写) -> App_wr_* -> SDRAM
+//   - 读通道：rfifo_32_32_512(异步FIFO, read_clk域) <- frame_fifo_read(突发读) <- App_rd_* <- SDRAM
+// 关键：写事务优先于读(App_wr_busy 参与读通道 into_burst 判断)，
+//       避免读把 SDRAM 带宽占满导致新图写不进 —— 这是双缓冲乒乓不卡死的基础
+// 4 个缓冲区基地址：read_addr_0~3 / write_addr_0~3 对应 BUF0~3(本工程只用 BUF0/BUF1 双缓冲)
+// ============================================================================
 module frame_read_write
 #
 (

@@ -1,4 +1,14 @@
 `timescale 1ns/1ps
+// ============================================================================
+// 文件：SD/frame_fifo_write.v
+// 功能：帧写状态机 —— 把异步 FIFO(wfifo)里的像素以突发(burst)方式写入 SDRAM
+// 关键特性：
+//   - 垂直翻转(WRITE_V_FLIP=1)：BMP 是"底向上"存储，写 SDRAM 时把行地址倒序映射
+//     (stream row0 -> memory row479)，使显示时图像正向。见 VFLIP_* 参数与 S_ACK 地址计算
+//   - 突发写：每次 128 个 32bit(BURST_SIZE)，S_CHECK_FIFO 用 rdusedw 判断 FIFO 有足够数据才发起
+//   - 写优先：into_burst 在 ~App_rd_busy 时才允许进入突发，保证写不被读饿死
+// 状态机：S_IDLE -> S_ACK(响应+地址锁存+FIFO清) -> S_CHECK_FIFO -> S_WRITE_BURST -> S_WRITE_BURST_END -> S_END
+// ============================================================================
 module frame_fifo_write
 #
 (

@@ -1,4 +1,17 @@
 
+// ============================================================================
+// 文件：SD/sd_card_cmd.v
+// 功能：SD 卡命令(CMD)与数据块读写的 SPI 协议状态机（中间层）
+// 职责：
+//   - 上电发 >=74 个 SPI 时钟(S_INIT)让卡退出 IDLE 进入 SPI 模式
+//   - 收到上层 cmd_req(48bit 命令) -> 逐字节发出 -> 等 R1 响应(S_CMD)
+//   - 块读：等数据起始令牌 0xFE -> 收 512 字节 + 2 字节 CRC(S_READ)
+//   - 块写：发起始令牌 0xFE -> 写 512 字节 + 2 字节 CRC -> 等写成功响应(S_WRITE_*)
+// 状态机：S_IDLE -> S_INIT -> S_WAIT ->
+//        (S_CMD_PRE->S_CMD->S_CMD_DATA | S_READ_WAIT->S_READ | S_WRITE_TOKEN->...)
+//        -> S_END/S_READ_ACK/S_WRITE_ACK -> S_WAIT
+// 命令格式：48bit = 1 start + 6 命令号 + 32 参数 + 7 CRC + 1 stop（见 S_CMD 的 byte_cnt 分配）
+// ============================================================================
 module sd_card_cmd(
 	input                       sys_clk,
 	input                       rst,
@@ -138,6 +151,7 @@ begin
 						spi_wr_req <= 1'b0;
 						byte_cnt <= 16'd0;
 					end
+					// 收到预期 R1 响应(且最高位=0表示无错误) -> 命令成功
 					else if(data_recv == cmd_r1)
 					begin
 						spi_wr_req <= 1'b0;
@@ -210,11 +224,12 @@ begin
 					send_data <= 8'hff;
 				end
 			end
-			S_READ:
+		S_READ:
+		begin
+			if(spi_wr_ack == 1'b1)
 			begin
-				if(spi_wr_ack == 1'b1)
-				begin
-					if(byte_cnt == 16'd513)
+				// 块读：收 512 字节数据 + 2 字节 CRC，byte_cnt 从 0 数到 513 结束
+				if(byte_cnt == 16'd513)
 					begin
 						state <= S_READ_ACK;
 						spi_wr_req <= 1'b0;

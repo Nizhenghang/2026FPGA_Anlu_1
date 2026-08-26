@@ -1,4 +1,25 @@
 
+////////////////////////////////////////////////////////////////////////////////
+// 模块: hdmi_audio_tone_i2s_64fs
+// 功能: HDMI 音频测试音的 I2S 发送端(比特串行)
+//       以 DDS(相位累加)方式生成 do-re-mi-fa-so-la-si-do(C4~C5)八音阶方波,
+//       经 I2S 协议(BCLK/LRCK/DOUT)按 64fs 帧格式串行送出, 供 I2S_receiver
+//       接收后转成并行 24bit L/R 音频数据送 HDMI 音频数据岛.
+// 时钟域: I_mclk = 12.288MHz (由 PLL_HDMI_AUDIO 产生, 音频主时钟)
+//        - BCLK = I_mclk/2 = 6.144MHz = 128fs (每个 LRCK 半周期含 64 个 BCLK 边沿)
+//        - LRCK = 48kHz (采样率 fs)
+//        - 每声道 64bit 帧(24bit 有效音频 + 40bit 填充), MSB 先发
+// 接口:
+//   I_mclk        : 12.288MHz 音频主时钟
+//   I_rst         : 复位(高有效)
+//   O_i2s_BCLK    : I2S 位时钟
+//   O_i2s_LRCK    : I2S 左右声道选择(频率 = fs)
+//   O_i2s_DOUT    : I2S 串行数据(MSB first)
+// 关键算法:
+//   note_inc_lut  : 八音阶相位增量表, 频率 f = note_inc * fs / 2^32
+//   相位累加 S_phase_acc 最高位作为方波判决 -> 输出 ±AMP 方波(1bit DDS)
+//   S_note_idx    : 当前音阶(0..7), 每个音持续 NOTE_HOLD_FRAMES(0.5s@48k)后切换
+////////////////////////////////////////////////////////////////////////////////
 module hdmi_audio_tone_i2s_64fs #(
     parameter [31:0] PHASE_INC = 32'd39370534,   // 兼容旧顶层，实际本版内部不用它
     parameter signed [23:0] AMP = 24'sd2000000,
@@ -54,7 +75,7 @@ always @(posedge I_mclk or posedge I_rst) begin
     end
     else begin
         // 保持和你现有接收端兼容的 64fs 发送时序
-        O_i2s_BCLK <= ~O_i2s_BCLK;
+        O_i2s_BCLK <= ~O_i2s_BCLK;   // BCLK 每个 I_mclk 边沿翻转 -> 6.144MHz(128fs)
 
         if (O_i2s_BCLK == 1'b1) begin
             O_i2s_DOUT  <= S_shift_reg[63];
@@ -65,21 +86,21 @@ always @(posedge I_mclk or posedge I_rst) begin
 
                 if (O_i2s_LRCK == 1'b0) begin
                     // 左声道发完，右声道复用同一个样本
-                    O_i2s_LRCK  <= 1'b1;
-                    S_shift_reg <= {S_sample_word[23:0], 40'd0};
+                    O_i2s_LRCK  <= 1'b1;             // 切到右声道
+                    S_shift_reg <= {S_sample_word[23:0], 40'd0}; // 重装本帧样本(左=右, 单声道)
                 end
                 else begin
                     // 右声道发完，进入下一帧样本
                     O_i2s_LRCK  <= 1'b0;
 
-                    S_phase_acc <= S_phase_acc + W_note_inc;
-                    if (S_phase_acc[31])
+                    S_phase_acc <= S_phase_acc + W_note_inc;  // 相位累加(1bit DDS)
+                    if (S_phase_acc[31])                       // 最高位=1 -> 方波正半周
                         S_sample_next <= AMP;
                     else
-                        S_sample_next <= -AMP;
+                        S_sample_next <= -AMP;                 // 最高位=0 -> 方波负半周
 
                     S_sample_word <= S_sample_next;
-                    S_shift_reg   <= {S_sample_next[23:0], 40'd0};
+                    S_shift_reg   <= {S_sample_next[23:0], 40'd0}; // 装入下一帧样本, MSB 先发
 
                     if (S_note_frame_cnt == NOTE_HOLD_FRAMES - 1) begin
                         S_note_frame_cnt <= 16'd0;

@@ -1,3 +1,12 @@
+////////////////////////////////////////////////////////////////////////////////
+// 模块: i2s_rom_player_single_pll_fix64  (ROM IP 版 I2S 音频测试音发送端)
+// 功能: 与 hdmi_audio_tone_i2s_64fs 同接口/同 I2S 时序, 但改用单端口 ROM 波表
+//       (48 点 24bit 正弦) + 相位累加查表(phase_step)合成八音阶正弦旋律,
+//       而非 1bit DDS 方波. 由 AUDIO_SAMPLE_ROM IP 实例化提供波表.
+// 说明: 本项目顶层实际使用的是 hdmi_audio_tone_i2s_64fs(方波版); 本文件为
+//       备用/对比实现(正弦波表版, 音质更好).
+// 详见下方模块内注释块(时钟/帧格式/旋律合成方式说明).
+////////////////////////////////////////////////////////////////////////////////
 module i2s_rom_player_single_pll_fix64 #(
     parameter integer SAMPLE_RATE       = 48000,
     parameter integer SAMPLE_BITS       = 24,

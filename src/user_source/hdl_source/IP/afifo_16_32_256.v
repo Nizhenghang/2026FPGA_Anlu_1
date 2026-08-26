@@ -10,6 +10,11 @@
  ** Date	:	2025 06 10
  ** TD version	:	5.6.119222
 \************************************************************/
+// ---------------------------------------------------------------------------
+// 本文件(2026Anlu1 项目说明)：安路 TD 生成的异步 FIFO IP（非手写，版权归 Anlogic）
+//   实际 module 名：wfifo_32_32_512（写 FIFO；文件名 afifo_16_32_256.v 与 module 名不一致）
+//   用途：frame_read_write 的写通道异步 FIFO，跨 write_clk(sd_card_clk) 与 mem_clk 域
+// ---------------------------------------------------------------------------
 module wfifo_32_32_512 #(parameter DATA_WIDTH_W = 32, 
         parameter DATA_WIDTH_R = 32, 
         parameter ADDR_WIDTH_W = 9, 

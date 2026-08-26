@@ -1,4 +1,19 @@
 
+// ============================================================================
+// 文件：SD/sd_card_bmp.v
+// 功能：BMP 播放控制最高层 —— 扫描、双缓冲调度、按键轮播
+// 与 bmp_read / sd_card_top 配合，完成"上电找图 -> 加载到 SDRAM -> 切换显示"
+// 关键设计：双缓冲乒乓
+//   - write_buf_idx(正在写入的缓冲) 与 disp_buf_idx(正在显示的缓冲) 始终不同，
+//     新图写"非当前显示"的另一块，整帧写完后(write_finish_toggle 脉冲同步)才切 disp_buf_idx，
+//     因此切图瞬间无缝、不黑屏
+//   - BUF0/BUF1 物理地址见顶层参数 BUF0_ADDR/BUF1_ADDR(各 307200 像素=640*480)
+// 交互：key_next=手动下一张(消抖后单脉冲)；key_auto=自动轮播开关(1Hz)
+//   - 上电自动扫描前 4 张图(记在 img_sector0~3)，自动加载首图到 buffer0
+// 跨时钟域：write_finish_toggle 来自 ext_mem_clk 域，用 3 级打拍(wrfin_tgl_sync)
+//       做边沿检测(write_finish_pulse)再用于切显示
+// 1Hz 自动播放：auto_cnt 数到 CLK_FREQ_HZ-1 产生 auto_tick
+// ============================================================================
 module sd_card_bmp #(
     parameter integer CLK_FREQ_HZ       = 100_000_000,
     parameter [31:0]  SCAN_START_SECTOR = 32'd0,
@@ -164,6 +179,8 @@ always @(posedge clk or posedge rst) begin
         source_done_seen      <= 1'b0;
         display_valid         <= 1'b0;
     end else begin
+        // 跨时钟域同步：write_finish_toggle 来自 ext_mem_clk 域(mem_clk 侧整帧写完拉一次)，
+        // 这里 3 级打拍后做边沿检测，避免亚稳态
         wrfin_tgl_sync   <= {wrfin_tgl_sync[1:0], write_finish_toggle};
         scan_start_pulse <= 1'b0;
         load_start_pulse <= 1'b0;
@@ -207,6 +224,8 @@ always @(posedge clk or posedge rst) begin
                 source_done_seen <= 1'b1;
 
             // 只有真正收到 write_finish_toggle 脉冲，才提交新图并切换显示缓冲区
+            // 整帧写完且源图已送完(FIFO) -> 提交新图：把显示缓冲切到刚写完的 pending_buf_idx(乒乓)，
+            // 这样切图瞬间不黑屏；img_idx 更新为当前显示图片编号，display_valid 置位(首图后一直为1)
             if (load_busy && source_done_seen && write_finish_pulse) begin
                 load_busy             <= 1'b0;
                 source_done_seen      <= 1'b0;
@@ -255,10 +274,11 @@ always @(posedge clk or posedge rst) begin
                 end
 
                 // 首图自动加载到 buffer0
+                // 首图：扫描完成后自动加载第 0 张(img_sector0)到 buffer0
                 if (scan_done && !first_image_committed && bmp_ready && !load_busy && (img_found_count != 3'd0)) begin
                     load_idx         <= 2'd0;
                     load_sector      <= img_sector0;
-                    pending_buf_idx  <= 2'd0;
+                    pending_buf_idx  <= 2'd0;   // 首图固定写 buffer0
                     write_buf_idx    <= 2'd0;
                     load_start_pulse <= 1'b1;
                     load_busy        <= 1'b1;

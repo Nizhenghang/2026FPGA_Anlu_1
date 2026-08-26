@@ -1,5 +1,14 @@
 
 
+// ============================================================================
+// 文件：hdmi_phy_warpper.v  (注：文件名/例化名沿用安路官方 "warpper" 拼写)
+// 功能：HDMI TMDS 物理层封装 —— 把 4 路 10bit TMDS 并行数据串行化后输出 LVDS 差分
+// 接口：输入 4 路 I_tmds_channel_{0,1,2,clk}(各 10bit，来自 HDMI 发射核)；
+//       输出 O_tmds_ch{0,1,2}_p + O_tmds_clk_p(板载 HDMI_B 的 TMDS 差分对)
+// 结构：例化 4 个 lane_lvds_10_1(3 数据通道 + 1 像素时钟通道)
+// 时序：I_pixel_clk=25MHz(像素), I_serial_clk=125MHz(=5x，DDR 串行)
+// 说明：前面 S_tmds_data_ch* 的逐位重组是等价占位(输入=输出)，可忽略
+// ============================================================================
 module hdmi_phy_wrapper#(
     parameter DEVICE = "EG"
     )(

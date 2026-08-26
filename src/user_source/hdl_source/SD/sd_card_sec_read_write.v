@@ -1,4 +1,18 @@
 
+////////////////////////////////////////////////////////////////////////////////
+// 模块: sd_card_sec_read_write
+// 功能: SD 卡初始化 + 扇区读写状态机(中间层)
+//       位于 sd_card_top(扇区接口) 与 sd_card_cmd(底层命令/数据块收发) 之间,
+//       把"读/写一个 512 字节扇区"抽象为 CMD17(读单块)/CMD24(写单块) 事务,
+//       并负责上电初始化序列 CMD0 -> CMD8 -> CMD55+CMD41 -> CMD16.
+// 时钟域: clk (系统时钟, 由 sys_pll 100MHz 提供)
+// 关键流程:
+//   初始化: 先以低速 SPI(SPI_LOW_SPEED_DIV)发 CMD0/CMD8/CMD55/CMD41 完成卡识别,
+//           成功后切高速 SPI(SPI_HIGH_SPEED_DIV)并 CMD16 设块长为 512 字节.
+//   读扇区: S_CMD17 发读命令 -> S_READ 收 512B -> S_READ_END
+//   写扇区: S_CMD24 发写命令 -> S_WRITE 发 512B -> S_WRITE_END
+// 接口: sd_sec_read/write* 为扇区级请求; cmd_*/block_* 为底层命令/块接口(接 sd_card_cmd)
+////////////////////////////////////////////////////////////////////////////////
 module sd_card_sec_read_write
 #(
 	parameter  SPI_LOW_SPEED_DIV = 248,         // spi clk speed = clk speed /((SPI_LOW_SPEED_DIV + 2) * 2 )
@@ -112,7 +126,7 @@ begin
 					cmd_req <= 1'b1;
 					cmd_data_len <= 16'd4;
 					cmd_r1 <= 8'h01;
-					cmd <= {8'd8,8'h00,8'h00,8'h01,8'haa,8'h87};
+					cmd <= {8'd8,8'h00,8'h00,8'h01,8'haa,8'h87}; // CMD8: SEND_IF_COND, 0x1AA 电压模式, 0x87 CRC
 				end
 			end
 			S_CMD55:
@@ -148,7 +162,7 @@ begin
 					cmd_req <= 1'b1;
 					cmd_data_len <= 16'd0;
 					cmd_r1 <= 8'h00;
-					cmd <= {8'd41,8'h40,8'h00,8'h00,8'h00,8'hff};
+					cmd <= {8'd41,8'h40,8'h00,8'h00,8'h00,8'hff}; // ACMD41: arg 0x40000000(HCS=1 支持 SDHC), 轮询至卡 ready
 				end
 			end
 			S_CMD16:
@@ -169,7 +183,7 @@ begin
 					cmd_req <= 1'b1;
 					cmd_data_len <= 16'd0;
 					cmd_r1 <= 8'h00;
-					cmd <= {8'd16,32'd512,8'hff};
+					cmd <= {8'd16,32'd512,8'hff}; // CMD16: SET_BLOCKLEN = 512 字节
 				end
 			end			
 			S_WAIT_READ_WRITE:
@@ -185,7 +199,7 @@ begin
 					sec_addr <= sd_sec_read_addr;
 				end
 
-				spi_clk_div <= 16'd0;
+				spi_clk_div <= 16'd0; // 进入读写前把 SPI 切到高速(SPI_HIGH_SPEED_DIV=0)
 			end
 			S_CMD24:
 			begin
@@ -199,7 +213,7 @@ begin
 					cmd_req <= 1'b1;
 					cmd_data_len <= 16'd0;
 					cmd_r1 <= 8'h00;
-					cmd <= {8'd24,sec_addr,8'hff};
+					cmd <= {8'd24,sec_addr,8'hff}; // CMD24: WRITE_BLOCK @sec_addr
 
 				end
 			end
@@ -225,7 +239,7 @@ begin
 					cmd_req <= 1'b1;
 					cmd_data_len <= 16'd0;
 					cmd_r1 <= 8'h00;
-					cmd <= {8'd17,sec_addr,8'hff};
+					cmd <= {8'd17,sec_addr,8'hff}; // CMD17: READ_SINGLE_BLOCK @sec_addr
 				end
 			end
 			S_READ:

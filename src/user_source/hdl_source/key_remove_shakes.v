@@ -18,7 +18,7 @@ module key_remove_shakes(
 	output reg      O_key_trig_out   
 );
 
-	///同步到处理时钟域，打三拍
+	///同步到处理时钟域, 连打 4 拍(1d~4d)消除按键异步输入的亚稳态, 取 3d/4d 做边沿检测
 	reg       S_key_in_sync_1d;      
 	reg       S_key_in_sync_2d;      
 	reg       S_key_in_sync_3d;      
@@ -48,7 +48,7 @@ module key_remove_shakes(
 		else
 			if(S_key_in_n_edge)
 				S_delay_en <= 1'b1;
-			else if(S_delay_cnt == 'd100000)
+			else if(S_delay_cnt == 'd100000)   // 计数满 100000(约 2ms @50MHz) -> 消抖窗口结束
 				S_delay_en <= 1'b0;
 			else
 				S_delay_en <= S_delay_en;
@@ -74,6 +74,7 @@ module key_remove_shakes(
 	assign S_delay_en_n_edge = ~S_delay_en & S_delay_en_1d;
 	
 	
+	// 消抖结束后, 在按键释放边沿(S_delay_en 下降沿 且 按键已松开)输出一个时钟周期高脉冲
 	always @ (posedge I_clk) begin
 		if(S_delay_en_n_edge && !S_key_in_sync_4d)
 			O_key_trig_out <= 1'b1;
