@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2026Anlu1 项目结构与模块关系图</title>
+<style>
+  :root{
+    --bg:#ffffff; --ink:#1f2933; --muted:#52606d; --line:#cbd2d9;
+    --blue:#2563eb; --green:#0f9d58; --amber:#d97706; --purple:#7c3aed;
+    --red:#dc2626; --teal:#0d9488; --gray:#64748b;
+    --soft-blue:#e8f0fe; --soft-green:#e6f4ea; --soft-amber:#fef3e2;
+    --soft-purple:#f3e8fd; --soft-red:#fde8e8; --soft-teal:#e0f2f1; --soft-gray:#f1f5f9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+       background:var(--bg);color:var(--ink);line-height:1.5;padding:28px 32px}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  h2{font-size:18px;margin:28px 0 12px;padding-bottom:6px;border-bottom:2px solid var(--line)}
+  .legend{display:flex;flex-wrap:wrap;gap:10px 18px;font-size:12px;margin:10px 0 4px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .chip{width:13px;height:13px;border-radius:3px;display:inline-block}
+  .diagram-wrap{overflow-x:auto;background:var(--soft-gray);border:1px solid var(--line);
+       border-radius:10px;padding:16px}
+  svg{display:block;max-width:100%;height:auto}
+  .node{fill:#fff;stroke-width:1.6;rx:8}
+  .node-title{font-size:12.5px;font-weight:700}
+  .node-sub{font-size:10px;fill:var(--muted)}
+  .edge{stroke:var(--muted);stroke-width:1.4;fill:none}
+  .edge-v{stroke:var(--blue);stroke-width:1.8}
+  .edge-a{stroke:var(--red);stroke-width:1.8}
+  .arrow{font-size:10px;fill:var(--muted)}
+  .tree{font-family:"Cascadia Code",Consolas,monospace;font-size:12.5px;
+        background:var(--soft-gray);border:1px solid var(--line);border-radius:10px;
+        padding:16px 18px;white-space:pre;overflow-x:auto;line-height:1.7;color:var(--ink)}
+  .tree .d{color:var(--blue);font-weight:700}
+  .tree .f{color:var(--muted)}
+  .tree .e{color:var(--red);font-weight:700}
+  .tree .v{color:var(--gray)}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px}
+  th,td{border:1px solid var(--line);padding:7px 10px;vertical-align:top;text-align:left}
+  th{background:var(--soft-gray);font-weight:700}
+  td.grp{font-weight:700;background:var(--soft-gray);white-space:nowrap}
+  code{background:var(--soft-gray);padding:1px 5px;border-radius:4px;font-size:12px}
+  .note{font-size:12px;color:var(--muted);margin-top:8px}
+  .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;margin-right:4px}
+  .t-self{background:var(--soft-blue);color:var(--blue)}
+  .t-vend{background:var(--soft-red);color:var(--red)}
+  .t-gen{background:var(--soft-amber);color:var(--amber)}
+  .t-spare{background:var(--soft-gray);color:var(--gray)}
+</style>
+</head>
+<body>
+<h1>2026Anlu1 · 项目结构与模块关系图</h1>
+<div class="sub">基于安路 EG4S20(HX4S20C) 的 HDMI 1.4b 多媒体播放系统 ｜ 顶层模块 <code>top_tf_hdmi_audio.v</code></div>
+
+<div class="legend">
+  <span><i class="chip" style="background:var(--blue)"></i>自写 HDL</span>
+  <span><i class="chip" style="background:var(--red)"></i>厂商加密 IP（不可改）</span>
+  <span><i class="chip" style="background:var(--amber)"></i>TD 生成 IP（改需回 TD）</span>
+  <span><i class="chip" style="background:var(--gray)"></i>备用/未例化</span>
+  <span><i class="chip" style="background:var(--green)"></i>视频数据流</span>
+  <span><i class="chip" style="background:var(--purple)"></i>音频数据流</span>
+</div>
+
+<h2>① 系统架构与数据流（模块层级 + 相互关系）</h2>
+<div class="diagram-wrap">
+<svg viewBox="0 0 1180 720" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+
+  <!-- ===== TOP ===== -->
+  <g>
+    <rect class="node" x="430" y="14" width="320" height="50" rx="8" stroke="var(--ink)" fill="var(--soft-gray)"/>
+    <text class="node-title" x="590" y="38" text-anchor="middle">top（top_tf_hdmi_audio.v）</text>
+    <text class="node-sub" x="590" y="54" text-anchor="middle">系统顶层 · 串接整条链路 · 统一复位 rst_all</text>
+  </g>
+
+  <!-- ===== CLOCK RAIL ===== -->
+  <g>
+    <rect class="node" x="40" y="92" width="1100" height="64" rx="8" stroke="var(--gray)" fill="var(--soft-gray)"/>
+    <text class="node-sub" x="60" y="108" font-weight="700" fill="var(--gray)">时钟 / 复位域（三 PLL 由 50MHz 晶振 clk 产生）</text>
+    <rect class="node" x="60" y="116" width="240" height="32" rx="6" stroke="var(--amber)" fill="#fff"/>
+    <text x="180" y="136" text-anchor="middle" font-size="11">sys_pll → sd_card_clk 100M / ext_mem_clk 125M</text>
+    <rect class="node" x="320" y="116" width="240" height="32" rx="6" stroke="var(--amber)" fill="#fff"/>
+    <text x="440" y="136" text-anchor="middle" font-size="11">video_pll → video_clk 25M / hdmi_5x_clk 125M</text>
+    <rect class="node" x="580" y="116" width="300" height="32" rx="6" stroke="var(--amber)" fill="#fff"/>
+    <text x="730" y="136" text-anchor="middle" font-size="11">PLL_HDMI_AUDIO → audio_mclk 12.288M</text>
+    <rect class="node" x="900" y="116" width="220" height="32" rx="6" stroke="var(--ink)" fill="var(--soft-red)"/>
+    <text x="1010" y="136" text-anchor="middle" font-size="11">rst_all = ~rst_n | ~audio_pll_lock</text>
+  </g>
+
+  <!-- ===== PIPELINE (video, green) ===== -->
+  <!-- Input group -->
+  <g>
+    <rect class="node" x="40" y="190" width="200" height="92" rx="8" stroke="var(--blue)" fill="var(--soft-blue)"/>
+    <text class="node-title" x="140" y="210" text-anchor="middle">输入：TF/BMP</text>
+    <text class="node-sub" x="140" y="228" text-anchor="middle">sd_card_bmp.v</text>
+    <text x="140" y="246" text-anchor="middle" font-size="10">├ sd_card_top.v</text>
+    <text x="140" y="262" text-anchor="middle" font-size="10">│ ├ sd_card_sec_rw.v</text>
+    <text x="140" y="278" text-anchor="middle" font-size="10">│ │ ├ sd_card_cmd.v</text>
+  </g>
+  <g>
+    <rect class="node" x="248" y="190" width="150" height="92" rx="8" stroke="var(--blue)" fill="#fff"/>
+    <text x="323" y="214" text-anchor="middle" font-size="11" font-weight="700">SPI</text>
+    <text x="323" y="230" text-anchor="middle" font-size="10">spi_master.v</text>
+    <text x="323" y="252" text-anchor="middle" font-size="10">bmp_read.v</text>
+    <text x="323" y="270" text-anchor="middle" font-size="9" fill="var(--muted)">(BGR→RGB解析)</text>
+    <text x="323" y="284" text-anchor="middle" font-size="9" fill="var(--muted)">ax_debounce.v</text>
+  </g>
+
+  <!-- Video timing generator feeds the pipeline trigger -->
+  <g>
+    <rect class="node" x="406" y="190" width="190" height="92" rx="8" stroke="var(--green)" fill="var(--soft-green)"/>
+    <text class="node-title" x="501" y="210" text-anchor="middle">帧缓存 / SDRAM</text>
+    <text x="501" y="228" text-anchor="middle" font-size="10">frame_read_write.v</text>
+    <text x="501" y="244" text-anchor="middle" font-size="10">├ frame_fifo_write.v → wfifo</text>
+    <text x="501" y="260" text-anchor="middle" font-size="10">└ frame_fifo_read.v  → rfifo</text>
+    <text x="501" y="278" text-anchor="middle" font-size="10">sdram.v → sdr_as_ram(enc)</text>
+  </g>
+
+  <g>
+    <rect class="node" x="606" y="190" width="180" height="92" rx="8" stroke="var(--green)" fill="#fff"/>
+    <text class="node-title" x="696" y="210" text-anchor="middle">视频时序/打包</text>
+    <text x="696" y="228" text-anchor="middle" font-size="10">video_timing_data.v</text>
+    <text x="696" y="244" text-anchor="middle" font-size="10">video_delay.v</text>
+    <text x="696" y="260" text-anchor="middle" font-size="10">color_bar.v(时序基)</text>
+    <text x="696" y="278" text-anchor="middle" font-size="10">video_rgb_to_axis.v</text>
+  </g>
+
+  <g>
+    <rect class="node" x="794" y="190" width="180" height="92" rx="8" stroke="var(--green)" fill="var(--soft-red)"/>
+    <text class="node-title" x="884" y="210" text-anchor="middle">HDMI 发射核</text>
+    <text x="884" y="228" text-anchor="middle" font-size="10">hdmi_1_4b_transmitter</text>
+    <text x="884" y="244" text-anchor="middle" font-size="10">_core_wrapper.enc.v</text>
+    <text x="884" y="262" text-anchor="middle" font-size="9" fill="var(--red)">★ 厂商加密 IP</text>
+    <text x="884" y="280" text-anchor="middle" font-size="9" fill="var(--muted)">含 EDID/DDC + 音频岛</text>
+  </g>
+
+  <g>
+    <rect class="node" x="982" y="190" width="158" height="92" rx="8" stroke="var(--green)" fill="#fff"/>
+    <text class="node-title" x="1061" y="210" text-anchor="middle">HDMI PHY</text>
+    <text x="1061" y="228" text-anchor="middle" font-size="10">hdmi_phy_warpper.v</text>
+    <text x="1061" y="246" text-anchor="middle" font-size="10">└ lane_lvds_10_1.v ×4</text>
+    <text x="1061" y="264" text-anchor="middle" font-size="9" fill="var(--muted)">10:1 DDR 串行</text>
+    <text x="1061" y="282" text-anchor="middle" font-size="9" fill="var(--muted)">→ HDMI_B 接口</text>
+  </g>
+
+  <!-- video flow arrows -->
+  <path class="edge-v" d="M240,236 H246"/>
+  <path class="edge-v" d="M398,236 H404"/>
+  <path class="edge-v" d="M596,236 H604"/>
+  <path class="edge-v" d="M786,236 H792"/>
+  <path class="edge-v" d="M974,236 H980"/>
+  <text class="arrow" x="612" y="182" text-anchor="middle" fill="var(--green)">像素/AXIS 数据流向 →</text>
+
+  <!-- ===== AUDIO BRANCH (purple) ===== -->
+  <g>
+    <rect class="node" x="40" y="320" width="200" height="78" rx="8" stroke="var(--purple)" fill="var(--soft-purple)"/>
+    <text class="node-title" x="140" y="342" text-anchor="middle">音频测试音</text>
+    <text x="140" y="360" text-anchor="middle" font-size="10">hdmi_audio_tone</text>
+    <text x="140" y="376" text-anchor="middle" font-size="10">_i2s_64fs.v</text>
+    <text x="140" y="392" text-anchor="middle" font-size="9" fill="var(--muted)">八音阶 DDS·I2S 64fs</text>
+  </g>
+  <g>
+    <rect class="node" x="258" y="320" width="180" height="78" rx="8" stroke="var(--purple)" fill="#fff"/>
+    <text class="node-title" x="348" y="344" text-anchor="middle">I2S 接收</text>
+    <text x="348" y="362" text-anchor="middle" font-size="10">I2S_receiver.v</text>
+    <text x="348" y="380" text-anchor="middle" font-size="10">→ 24bit L/R PCM</text>
+    <text x="348" y="394" text-anchor="middle" font-size="9" fill="var(--muted)">3级同步消亚稳</text>
+  </g>
+  <g>
+    <rect class="node" x="456" y="320" width="190" height="78" rx="8" stroke="var(--purple)" fill="#fff"/>
+    <text class="node-title" x="551" y="344" text-anchor="middle">ACR 计算</text>
+    <text x="551" y="362" text-anchor="middle" font-size="10">audio_arc_calculate.v</text>
+    <text x="551" y="380" text-anchor="middle" font-size="10">算 CTS/N(N=6144)</text>
+    <text x="551" y="394" text-anchor="middle" font-size="9" fill="var(--muted)">供 HDMI 音频时钟恢复</text>
+  </g>
+  <path class="edge-a" d="M240,358 H256"/>
+  <path class="edge-a" d="M438,358 H454"/>
+  <!-- audio into HDMI core -->
+  <path class="edge-a" d="M646,360 C740,360 740,236 884,236" fill="none"/>
+  <text class="arrow" x="884" y="312" text-anchor="middle" fill="var(--purple)">音频数据岛 ↑</text>
+
+  <!-- ===== SUPPORT / AUX ===== -->
+  <g>
+    <rect class="node" x="40" y="430" width="200" height="56" rx="8" stroke="var(--ink)" fill="#fff"/>
+    <text class="node-title" x="140" y="452" text-anchor="middle">启动脉冲</text>
+    <text x="140" y="470" text-anchor="middle" font-size="10">startup_pulse.v → EDID 触发</text>
+  </g>
+  <g>
+    <rect class="node" x="258" y="430" width="200" height="56" rx="8" stroke="var(--blue)" fill="var(--soft-blue)"/>
+    <text class="node-title" x="358" y="452" text-anchor="middle">状态显示</text>
+    <text x="358" y="470" text-anchor="middle" font-size="10">seg_decoder.v / seg_scan.v</text>
+  </g>
+
+  <!-- ===== SPARE / NOT INSTANTIATED ===== -->
+  <g>
+    <rect class="node" x="600" y="430" width="540" height="120" rx="8" stroke="var(--gray)" fill="var(--soft-gray)"/>
+    <text class="node-title" x="616" y="452" font-size="12" fill="var(--gray)">辅助 / 备用（未例化进顶层）</text>
+    <text x="616" y="472" font-size="10.5">• video_source_test.v — TPG 彩条测试图（HDMI 自测，默认 1920×1080）</text>
+    <text x="616" y="490" font-size="10.5">• hdmi_audio_tone_pcm_scale.v — 并行 PCM 版测试音（替代 I2S 版）</text>
+    <text x="616" y="508" font-size="10.5">• rom/i2s_rom_player_single_pll_fix64_rom_ip.v — ROM 正弦波表（替代 DDS）</text>
+    <text x="616" y="526" font-size="10.5">• key_remove_shakes.v — 替代消抖（顶层用 ax_debounce）</text>
+    <text x="616" y="544" font-size="10.5">• ip_source/pll.v — 独立 PLL(75/375M) ｜ test/* — I2S 音频测试顶层</text>
+  </g>
+
+  <!-- constraints / doc -->
+  <g>
+    <rect class="node" x="40" y="510" width="540" height="120" rx="8" stroke="var(--teal)" fill="var(--soft-teal)"/>
+    <text class="node-title" x="56" y="532" font-size="12" fill="var(--teal)">约束 / 配置 / 文档（非 HDL）</text>
+    <text x="56" y="552" font-size="10.5">• constraints_source/pin.adc — 引脚分配（LED/HDMI/TF/按键）</text>
+    <text x="56" y="570" font-size="10.5">• constraints_source/timing.sdc — 时序约束（含异步时钟组）</text>
+    <text x="56" y="588" font-size="10.5">• constraints_source/edid_debug.cwc — DDC/EDID 约束</text>
+    <text x="56" y="606" font-size="10.5">• include/global_def.v — SDRAM 宏定义（`include）</text>
+    <text x="56" y="624" font-size="10.5">• SD/video_define.v — `define VIDEO_640_480 分辨率宏</text>
+    <text x="56" y="642" font-size="10.5">• doc/ — 安路手册 + 测试 BMP + convert 转换脚本(Python)</text>
+  </g>
+
+  <!-- module hierarchy note -->
+  <text x="1160" y="700" text-anchor="end" font-size="10" fill="var(--muted)">层级：top → 子系统 → 子模块（缩进=例化嵌套）｜ ★=厂商加密 IP</text>
+</svg>
+</div>
+<div class="note">读图：绿色为像素主数据流（TF卡→SDRAM→HDMI），紫色为音频流（测试音→I2S→ACR→并入 HDMI 音频岛）。三 PLL 提供 100/125/25/12.288MHz 时钟，统一复位 <code>rst_all</code> 须等音频 PLL 锁定。</div>
+
+<h2>② 目录结构树</h2>
+<div class="tree"><span class="d">src/user_source/</span>
+├─ <span class="d">hdl_source/</span>                         <span class="f"># 自写 HDL 主目录</span>
+│  ├─ <span class="f">top_tf_hdmi_audio.v</span>            <span class="f">顶层</span>
+│  ├─ <span class="f">startup_pulse.v</span>               <span class="f">上电 EDID 触发脉冲</span>
+│  ├─ <span class="f">video_rgb_to_axis_640x480.v</span>   <span class="f">RGB+时序 → AXI4-Stream</span>
+│  ├─ <span class="f">video_source_test.v</span>           <span class="v">[备用] 彩条 TPG</span>
+│  ├─ <span class="f">hdmi_phy_warpper.v</span>            <span class="f">HDMI TMDS PHY 封装</span>
+│  ├─ <span class="f">lane_lvds_10_1.v</span>              <span class="f">单通道 10:1 DDR 串行</span>
+│  ├─ <span class="f">key_remove_shakes.v</span>           <span class="v">[备用] 按键消抖</span>
+│  ├─ <span class="e">hdmi1.4b_transmitter_core/</span>
+│  │  └─ <span class="e">hdmi_1_4b_transmitter_core_wrapper.enc.v</span>  <span class="f">★加密 HDMI 核</span>
+│  ├─ <span class="d">audio/</span>  <span class="f">(实际在 hdl_source 根)</span>
+│  │  ├─ <span class="f">hdmi_audio_tone_i2s_64fs.v</span>  <span class="f">八音阶 I2S 测试音</span>
+│  │  ├─ <span class="f">I2S_receiver.v</span>              <span class="f">I2S → 24bit PCM</span>
+│  │  ├─ <span class="f">audio_arc_calculate.v</span>        <span class="f">ACR CTS/N</span>
+│  │  └─ <span class="v">hdmi_audio_tone_pcm_scale.v</span> <span class="v">[备用] 并行 PCM 音</span>
+│  ├─ <span class="d">rom/</span>
+│  │  └─ <span class="v">i2s_rom_player_single_pll_fix64_rom_ip.v</span>  <span class="v">[备用] ROM 正弦</span>
+│  ├─ <span class="d">SD/</span>                            <span class="f"># SD/BMP/视频时序</span>
+│  │  ├─ <span class="f">sd_card_top.v</span>               <span class="f">SD 读图顶层</span>
+│  │  ├─ <span class="f">sd_card_sec_read_write.v</span>     <span class="f">扇区读写+初始化</span>
+│  │  ├─ <span class="f">sd_card_cmd.v</span>               <span class="f">SD 命令/R1</span>
+│  │  ├─ <span class="f">spi_master.v</span>                <span class="f">SPI 字节收发</span>
+│  │  ├─ <span class="f">bmp_read.v</span>                  <span class="f">BMP 头解析+BGR→RGB</span>
+│  │  ├─ <span class="f">sd_card_bmp.v</span>               <span class="f">扫描/双缓冲/切换</span>
+│  │  ├─ <span class="f">ax_debounce.v</span>               <span class="f">按键消抖</span>
+│  │  ├─ <span class="f">seg_decoder.v</span> / <span class="f">seg_scan.v</span>  <span class="f">数码管</span>
+│  │  ├─ <span class="f">frame_read_write.v</span>           <span class="f">帧缓存读写仲裁</span>
+│  │  ├─ <span class="f">frame_fifo_write.v</span> / <span class="f">frame_fifo_read.v</span>  <span class="f">突发读写</span>
+│  │  ├─ <span class="f">sdram.v</span>                     <span class="f">SDRAM 控制器封装</span>
+│  │  ├─ <span class="f">video_timing_data.v</span>          <span class="f">hs/vs/de 时序</span>
+│  │  ├─ <span class="f">video_delay.v</span>               <span class="f">时序对齐移位</span>
+│  │  ├─ <span class="f">color_bar.v</span>                 <span class="f">彩条时序基</span>
+│  │  └─ <span class="f">video_define.v</span>              <span class="f">分辨率宏</span>
+│  ├─ <span class="d">IP/</span>                           <span class="f"># TD 生成 IP</span>
+│  │  ├─ <span class="f">sys_pll.v</span> / <span class="f">video_pll.v</span>   <span class="f">系统/视频 PLL</span>
+│  │  ├─ <span class="f">afifo_16_256.v</span>              <span class="f">备用 FIFO</span>
+│  │  ├─ <span class="f">afifo_16_32_256.v</span> (=wfifo) <span class="f">写 FIFO(跨时钟)</span>
+│  │  ├─ <span class="f">afifo_32_16_256.v</span> (=rfifo) <span class="f">读 FIFO(跨时钟)</span>
+│  │  └─ <span class="e">sdram.v/.vhd</span>                <span class="f">★厂商 PHY IP</span>
+│  ├─ <span class="d">include/</span>
+│  │  ├─ <span class="f">global_def.v</span>                <span class="f">SDRAM 宏定义</span>
+│  │  └─ <span class="e">sdr_as_ram.enc.v</span> 等 3 个     <span class="f">★加密 SDRAM IP</span>
+│  ├─ <span class="d">ip_source/</span>
+│  │  └─ <span class="v">pll.v</span>                       <span class="v">[备用] 独立 PLL</span>
+│  ├─ <span class="d">test/</span>
+│  │  └─ <span class="v">design_top_i2s_test_pll.v</span> 等  <span class="v">[测试] I2S 顶层</span>
+│  └─ <span class="d">python/</span>                      <span class="f">wav→mif 转换脚本</span>
+├─ <span class="d">constraints_source/</span>               <span class="f">pin.adc / timing.sdc / edid_debug.cwc</span>
+└─ <span class="d">ip_source/</span>                        <span class="f">pll.v 等
+
+<span class="d">src/td_project/</span>                       <span class="f"># TD 工程缓存(bit/log/IP)</span>
+<span class="d">doc/</span>                                  <span class="f"># 手册/测试 BMP/convert 脚本</span>
+<span class="f">代码说明.md / 设计参考例程文档.md</span>          <span class="f"># 项目说明</span></div>
+
+<h2>③ 各文件作用一览（按子系统）</h2>
+<table>
+<thead><tr><th style="width:150px">子系统</th><th style="width:230px">文件</th><th>作用</th><th style="width:96px">类型</th></tr></thead>
+<tbody>
+<tr><td class="grp">顶层</td><td><code>top_tf_hdmi_audio.v</code></td><td>系统顶层，串接 TF读图→SDRAM双缓冲→HDMI 视频+音频全链路；产出 3 时钟域、统一复位 rst_all、按键/数码管接口</td><td><span class="tag t-self">自写</span></td></tr>
+
+<tr><td class="grp" rowspan="3">时钟/复位</td><td><code>IP/sys_pll.v</code></td><td>系统 PLL：输入 50M，出 sd_card_clk(100M)、ext_mem_clk(125M,带相位微调)</td><td><span class="tag t-gen">TD生成</span></td></tr>
+<tr><td><code>IP/video_pll.v</code></td><td>视频 PLL：出 video_clk(25M 像素)、hdmi_5x_clk(125M 串行)</td><td><span class="tag t-gen">TD生成</span></td></tr>
+<tr><td><code>td_project/al_ip/PLL_HDMI_AUDIO.v</code></td><td>音频 PLL：出 audio_mclk(12.288M)，extlock 作复位门控</td><td><span class="tag t-gen">TD生成</span></td></tr>
+
+<tr><td class="grp" rowspan="7">输入<br>TF/BMP</td><td><code>SD/sd_card_bmp.v</code></td><td>播放控制顶层：TF卡扫描、双缓冲乒乓、key1下一张/key2自动轮播、跨时钟同步</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/sd_card_top.v</code></td><td>SD 三层结构顶层：调度扇区读写与 BMP 加载</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/sd_card_sec_read_write.v</code></td><td>扇区读写+初始化（CMD0/8/55/41/16，CMD17读/CMD24写）</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/sd_card_cmd.v</code></td><td>SD 命令层：发 CMD、收 R1 响应、块读 0xFE token</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/spi_master.v</code></td><td>SPI 主：CPOL=CPHA=1，MSB 优先，字节收发状态机</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/bmp_read.v</code></td><td>BMP 头解析（BM/54B偏移/640×480/24bit无压缩）、BGR→RGB 组装</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/ax_debounce.v</code></td><td>通用按键消抖+边沿检测（2级 DFF）</td><td><span class="tag t-self">自写</span></td></tr>
+
+<tr><td class="grp" rowspan="5">帧缓存<br>SDRAM</td><td><code>SD/frame_read_write.v</code></td><td>帧缓存读写仲裁顶层：wfifo/rfifo 异步 FIFO + 写优先；BUF0/BUF1 基址</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/frame_fifo_write.v</code></td><td>突发写状态机（BURST=128），垂直翻转映射</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/frame_fifo_read.v</code></td><td>突发读，3级同步 read_req 到 mem_clk</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/sdram.v</code></td><td>用户 SDRAM 控制器封装：例化加密 sdr_as_ram + 厂商 PHY</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>IP/afifo_16_32_256.v</code> / <code>afifo_32_16_256.v</code></td><td>wfifo(写时钟↔mem)/ rfifo(mem↔video) 跨时钟异步 FIFO</td><td><span class="tag t-gen">TD生成</span></td></tr>
+
+<tr><td class="grp" rowspan="4">视频<br>时序/打包</td><td><code>SD/video_timing_data.v</code></td><td>产生 hs/vs/de 时序（例化 color_bar 作时序基），VS 边沿发 read_req</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/video_delay.v</code></td><td>21级移位寄存器对齐数据与时序</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>SD/color_bar.v</code></td><td>8色彩条时序发生器（本工程仅用时序，rgb 未接）</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>video_rgb_to_axis_640x480.v</code></td><td>并行 RGB+时序 → AXI4-Stream（SOF/valid/last）</td><td><span class="tag t-self">自写</span></td></tr>
+
+<tr><td class="grp" rowspan="3">HDMI<br>发射</td><td><code>hdmi1.4b_transmitter_core_wrapper.enc.v</code></td><td>★安路加密 HDMI 1.4b 核：TMDS 编码、EDID/DDC、视频+音频数据岛</td><td><span class="tag t-vend">加密IP</span></td></tr>
+<tr><td><code>hdmi_phy_warpper.v</code></td><td>HDMI TMDS PHY 封装：例化 4× lane_lvds_10_1，输出到 HDMI_B</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>lane_lvds_10_1.v</code></td><td>单通道 TMDS 10:1 DDR 串行化（EG_LOGIC_ODDR）</td><td><span class="tag t-self">自写</span></td></tr>
+
+<tr><td class="grp" rowspan="3">音频<br>链路</td><td><code>hdmi_audio_tone_i2s_64fs.v</code></td><td>八音阶测试音（do-re-mi…），DDS 方波，64fs I2S 串行输出</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>I2S_receiver.v</code></td><td>I2S 解串：3级同步消亚稳，取 24bit L/R PCM</td><td><span class="tag t-self">自写</span></td></tr>
+<tr><td><code>audio_arc_calculate.v</code></td><td>算 ACR 包 CTS/N（N=6144）供 HDMI 音频时钟恢复</td><td><span class="tag t-self">自写</span></td></tr>
+
+<tr><td class="grp">显示/触发</td><td><code>startup_pulse.v</code> / <code>SD/seg_decoder.v</code> / <code>SD/seg_scan.v</code></td><td>上电脉冲触发 EDID 读取；SD 状态码→7段译码→动态扫描数码管</td><td><span class="tag t-self">自写</span></td></tr>
+
+<tr><td class="grp">约束/宏</td><td><code>constraints_source/pin.adc</code> · <code>timing.sdc</code> · <code>edid_debug.cwc</code> · <code>include/global_def.v</code> · <code>SD/video_define.v</code></td><td>引脚分配 / 时序约束（异步时钟组）/ DDC 约束 / SDRAM 宏 / 分辨率宏</td><td><span class="tag t-self">配置</span></td></tr>
+
+<tr><td class="grp">备用/测试</td><td><code>video_source_test.v</code> · <code>hdmi_audio_tone_pcm_scale.v</code> · <code>rom/i2s_rom_player_single_pll_fix64_rom_ip.v</code> · <code>key_remove_shakes.v</code> · <code>ip_source/pll.v</code> · <code>test/*</code></td><td>未例化进顶层的替代实现与独立测试顶层（TPG/并行PCM/ROM正弦/替代消抖/独立PLL/I2S测试）</td><td><span class="tag t-spare">备用</span></td></tr>
+</tbody>
+</table>
+<div class="note">类型图例：<span class="tag t-self">自写</span> 用户 HDL（可改）｜ <span class="tag t-vend">加密IP</span> 安路厂商（不可改）｜ <span class="tag t-gen">TD生成</span> 改频率需回 TD 重新生成 ｜ <span class="tag t-spare">备用</span> 未接入顶层。</div>
+
+</body>
+</html>
