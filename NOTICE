@@ -1,0 +1,32 @@
+第三方组件声明 / Third-Party Notices
+=====================================
+
+本项目（2026FPGA_Anlu_1）在安路科技（Anlogic）官方设计参考例程基础上改编，
+并依赖以下第三方知识产权（Intellectual Property）。这些组件**未包含在本仓库中**，
+其版权归安路科技所有，使用须遵守安路科技相应的授权条款。
+
+1. HDMI 1.4b 发射核（APUG092）
+   - 文件：hdmi_1_4b_transmitter_core_wrapper.enc.v（加密网表）
+   - 权利人：安路科技（Anlogic）
+   - 形式：TD 加密 IP 核（*.enc.v）
+
+2. SDRAM 控制器 IP
+   - 文件：include/sdr_as_ram.enc.v、include/sdr_init_ref.enc.v、include/sdr_wrrd.enc.v（加密网表）
+   - 权利人：安路科技（Anlogic）
+   - 形式：TD 加密 IP 核（*.enc.v）
+
+3. TD 生成 IP（PLL / SDRAM / AFIFO / 音频 ROM 等）
+   - 文件：*.vhd（如 sys_pll.vhd、video_pll.vhd、sdram.vhd、afifo_16_256.vhd 等）
+   - 权利人：安路科技（Anlogic）
+   - 形式：TD IP 向导生成的网表/例化文件
+
+4. 官方设计参考文档与示例资源
+   - 文件：doc/ 目录、设计参考例程文档.md、设计参考例程文档.docx
+   - 权利人：安路科技（Anlogic）
+   - 说明：属安路官方参赛参考材料，未随本仓库分发
+
+获取方式：
+  上述第三方组件请通过安路科技官方 TD 开发环境及 EG4S20 器件 IP 包自行获取，
+  并遵守其许可协议。本仓库作者不对第三方组件的可用性、合规性或授权状态负责。
+
+本仓库内用户自写代码以 MIT 许可证发布（见 LICENSE），不影响上述第三方的权利。
