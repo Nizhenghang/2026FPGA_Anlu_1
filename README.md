@@ -20,17 +20,20 @@
 
 ---
 
-## 二、第三方 IP 与官方资料声明（重要）
+## 二、本仓库已自包含（含安路第三方 IP，重要）
 
-本设计依赖安路科技（Anlogic）专有 IP 与官方资料。按授权条款，**以下内容不随本仓库分发**，需自行从 Anlogic TD 开发环境及 EG4S20 IP 包获取：
+为便于团队协作与**直接综合**，本仓库已一并纳入安路科技（Anlogic）专有 IP 与官方资料。
+这些组件的版权仍归安路科技所有，仅随本仓库分发供**团队内部学习与 2026 安路赛道竞赛开发**使用；
+对外公开分发前请自行确认安路授权条款与赛事规则（详见 `NOTICE`）。
 
-- **加密网表核（`*.enc.v`，已排除）**
-  - HDMI 1.4b 发射核 APUG092：`hdmi_1_4b_transmitter_core_wrapper.enc.v`
-  - SDRAM 控制器：`include/sdr_as_ram.enc.v`、`sdr_init_ref.enc.v`、`sdr_wrrd.enc.v`
-- **TD 生成 IP（`*.vhd`，已排除）**：PLL（`sys_pll` / `video_pll` / `PLL_HDMI_AUDIO`）、SDRAM 控制器、`afifo_16_256`、音频 ROM 等
-- **安路官方参考文档（已排除）**：`doc/` 目录、`设计参考例程文档.md` / `.docx`
+- **加密网表核（`*.enc.v`）**
+  - HDMI 1.4b 发射核 APUG092：`src/user_source/hdl_source/hdmi1.4b_transmitter_core/hdmi_1_4b_transmitter_core_wrapper.enc.v`
+  - SDRAM 控制器：`src/user_source/hdl_source/include/sdr_as_ram.enc.v`、`sdr_init_ref.enc.v`、`sdr_wrrd.enc.v`
+- **TD 生成 IP（`*.vhd`）**：`src/td_project/al_ip/`、`src/user_source/hdl_source/IP/`、`src/user_source/ip_source/` 下的 PLL / SDRAM / AFIFO / 音频 ROM 等
+- **安路官方参考文档**：`doc/` 目录、`设计参考例程文档.md` / `.docx`
 
-仓库内仅包含**用户自写的可综合 HDL、约束文件与说明文档**。
+> 说明：仓库**不包含**综合产物（`*_Runs/`、生成 bit 流 `*.bit`、构建日志 `*.log/.logw`），
+> 同学 clone 后需用 TD 在本机重新综合。本地记忆 `.workbuddy/` 也不入库（含个人隐私）。
 
 ---
 
@@ -65,10 +68,12 @@
 
 ## 四、构建与运行
 
-1. 安装 **Anlogic TD**，并获取 **EG4S20 IP 包**（含上述 `*.enc.v` 加密核与 `*.vhd` 生成 IP）。
+1. 安装 **Anlogic TD**（建议与例程同源版本）。本仓库已含 EG4S20 IP 包所需的 `*.enc.v` 加密核与 `*.vhd` 生成 IP，**无需另行获取**。
 2. 用 TD 打开 `src/td_project/HDMI1.4b_Transmitter_v1.0.al`。
 3. 综合 → 实现 → 生成 bit 流，下载至 HX4S20C。
-4. HDMI 线接开发板 **HDMI_B** 接口连接显示器；TF 卡放入符合要求的 24-bit 非压缩 BMP（640×480，参考官方参考例程的 `doc/TF卡图片` 与转换脚本，需自行准备）。
+4. HDMI 线接开发板 **HDMI_B** 接口连接显示器；TF 卡放入符合要求的 24-bit 非压缩 BMP（640×480，可直接用 `doc/TF卡图片` 中的测试图，或用 `doc/convert/` 脚本转换自己的图片）。
+
+> 注：综合产物与日志未纳入版本管理，每次在本机重新综合即可。
 
 ---
 
