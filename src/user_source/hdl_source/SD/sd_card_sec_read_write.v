@@ -16,7 +16,7 @@
 module sd_card_sec_read_write
 #(
 	parameter  SPI_LOW_SPEED_DIV = 248,         // spi clk speed = clk speed /((SPI_LOW_SPEED_DIV + 2) * 2 )
-	parameter  SPI_HIGH_SPEED_DIV = 0           // spi clk speed = clk speed /((SPI_HIGH_SPEED_DIV + 2) * 2 )
+	parameter  SPI_HIGH_SPEED_DIV = 4           // 与 sd_card_top 保持一致: 8.3MHz, 提升 TF 卡 SPI 读块兼容性
 )
 (
 	input            clk,
@@ -199,7 +199,9 @@ begin
 					sec_addr <= sd_sec_read_addr;
 				end
 
-				spi_clk_div <= 16'd0; // 进入读写前把 SPI 切到高速(SPI_HIGH_SPEED_DIV=0)
+				// 进入读写前把 SPI 切到高速; 注意必须用参数 SPI_HIGH_SPEED_DIV(当前=4 -> 8.3MHz,
+				// 提升 TF 卡兼容性), 不能硬编码 0(25MHz) —— 否则改参数无效、卡在高速下易读失败.
+				spi_clk_div <= SPI_HIGH_SPEED_DIV[15:0];
 			end
 			S_CMD24:
 			begin
@@ -234,6 +236,13 @@ begin
 					state <= S_READ;
 					cmd_req <= 1'b0;
 				end
+				else if(cmd_req_ack)
+				begin
+					// CMD17 响应出错 -> 中止本次读, 产生 sd_sec_read_end 让上层推进到下一扇区
+					state <= S_READ_END;
+					cmd_req <= 1'b0;
+					block_read_req <= 1'b0;
+				end
 				else
 				begin
 					cmd_req <= 1'b1;
@@ -246,6 +255,13 @@ begin
 			begin
 				if(block_read_req_ack)
 				begin
+					state <= S_READ_END;
+					block_read_req <= 1'b0;
+				end
+				else if(cmd_req_error)
+				begin
+					// 底层读令牌/数据超时(sd_card_cmd 置 cmd_req_error) -> 中止,
+					// 产生 sd_sec_read_end 让 bmp_read 跳过本扇区继续扫描, 避免整机挂死
 					state <= S_READ_END;
 					block_read_req <= 1'b0;
 				end

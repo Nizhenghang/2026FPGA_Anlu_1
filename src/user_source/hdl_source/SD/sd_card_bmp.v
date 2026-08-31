@@ -80,6 +80,9 @@ reg              load_busy;
 
 // bmp_ready 先表示“源文件读取/送 FIFO 完成”；真正切显示要等 write_finish_toggle 同步后
 reg              source_done_seen;
+reg              write_done_seen;     // 整帧写完的锁存标志(用锁存避免直接采 write_finish_pulse 被漏采)
+reg [31:0]       load_timeout_cnt;   // 加载超时计数器: 数到 100_000_000(@100MHz)=1秒 触发防死锁
+reg              load_abort;          // 超时/坏图时强制中止信号, 下传 bmp_read 让其回到 ST_IDLE
 
 // 同步 mem_clk 域的 write_finish_toggle
 reg [2:0]        wrfin_tgl_sync;
@@ -177,6 +180,9 @@ always @(posedge clk or posedge rst) begin
         next_req_pending      <= 1'b0;
         load_busy             <= 1'b0;
         source_done_seen      <= 1'b0;
+        write_done_seen       <= 1'b0;
+        load_timeout_cnt      <= 32'd0;
+        load_abort            <= 1'b0;
         display_valid         <= 1'b0;
     end else begin
         // 跨时钟域同步：write_finish_toggle 来自 ext_mem_clk 域(mem_clk 侧整帧写完拉一次)，
@@ -184,6 +190,7 @@ always @(posedge clk or posedge rst) begin
         wrfin_tgl_sync   <= {wrfin_tgl_sync[1:0], write_finish_toggle};
         scan_start_pulse <= 1'b0;
         load_start_pulse <= 1'b0;
+        load_abort       <= 1'b0;
 
         if (!sd_init_done) begin
             scan_kicked           <= 1'b0;
@@ -203,6 +210,9 @@ always @(posedge clk or posedge rst) begin
             next_req_pending      <= 1'b0;
             load_busy             <= 1'b0;
             source_done_seen      <= 1'b0;
+            write_done_seen       <= 1'b0;
+            load_timeout_cnt      <= 32'd0;
+            load_abort            <= 1'b0;
             display_valid         <= 1'b0;
         end else begin
             // 扫描阶段缓存前 4 张图的起始 sector
@@ -223,16 +233,37 @@ always @(posedge clk or posedge rst) begin
             if (load_busy && bmp_ready)
                 source_done_seen <= 1'b1;
 
-            // 只有真正收到 write_finish_toggle 脉冲，才提交新图并切换显示缓冲区
-            // 整帧写完且源图已送完(FIFO) -> 提交新图：把显示缓冲切到刚写完的 pending_buf_idx(乒乓)，
-            // 这样切图瞬间不黑屏；img_idx 更新为当前显示图片编号，display_valid 置位(首图后一直为1)
-            if (load_busy && source_done_seen && write_finish_pulse) begin
+            // 记住写帧完成脉冲(锁存)，避免“先写完后源结束”导致脉冲被漏采而卡死
+            if (load_busy && write_finish_pulse)
+                write_done_seen <= 1'b1;
+
+            // 只有“源图送完 + 整帧写完”都满足，才提交新图并切换显示缓冲区
+            // 用锁存标志(source_done_seen && write_done_seen)比直接采脉冲更稳健，不会因
+            // 跨时钟域漏采一个脉冲而永远不切显示(黑屏)
+            if (load_busy && source_done_seen && write_done_seen) begin
                 load_busy             <= 1'b0;
+                load_timeout_cnt      <= 32'd0;
                 source_done_seen      <= 1'b0;
+                write_done_seen       <= 1'b0;
                 disp_buf_idx          <= pending_buf_idx;
                 img_idx               <= load_idx;
                 display_valid         <= 1'b1;
                 first_image_committed <= 1'b1;
+            end else if (load_busy) begin
+                // 加载超时防死锁(代码说明要求的 1 秒机制):
+                // 若读到坏图/截断文件/卡无响应导致始终凑不齐“源完+帧完”，
+                // 数到 100_000_000(@100MHz=1秒)后强制释放 busy 并 load_abort，恢复系统运行
+                if (load_timeout_cnt > 32'd100_000_000) begin
+                    load_busy             <= 1'b0;
+                    load_timeout_cnt      <= 32'd0;
+                    source_done_seen      <= 1'b0;
+                    write_done_seen       <= 1'b0;
+                    load_abort            <= 1'b1;
+                end else begin
+                    load_timeout_cnt <= load_timeout_cnt + 32'd1;
+                end
+            end else begin
+                load_timeout_cnt <= 32'd0;
             end
 
             // 上电后自动发起一次“扫描前 4 张 BMP”
@@ -329,6 +360,7 @@ bmp_read bmp_read_m0(
     .scan_found_total       (scan_found_total),
 
     .load_start             (load_start_pulse),
+    .load_abort             (load_abort),
     .load_sector            (load_sector),
 
     .sd_init_done           (sd_init_done),

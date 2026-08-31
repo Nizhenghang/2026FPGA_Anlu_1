@@ -62,6 +62,11 @@ reg[15:0]                     byte_cnt;
 reg[7:0]                      send_data;
 wire[7:0]                     data_recv;
 reg[9:0]                      wr_data_cnt;
+// 读块超时计数: 等待数据起始令牌 0xFE(S_READ_WAIT) 或收 512B(S_READ) 时计时,
+// 超过 READ_TIMEOUT_MAX 仍未完成则报错返回(S_ERR), 避免卡不响应时整机挂死.
+// 100MHz 下 10_000_000 ≈ 100ms, 远大于一次正常 512B 读(~0.5ms@8.3MHz), 不会误触发.
+reg[23:0]                     read_timeout_cnt;
+localparam [23:0]             READ_TIMEOUT_MAX = 24'd10_000_000;
 
 assign cmd_req_ack = (state == S_END);
 assign block_read_req_ack = (state == S_READ_ACK);
@@ -82,6 +87,7 @@ begin
 		state <= S_IDLE;
 		cmd_req_error <= 1'b0;
 		wr_data_cnt <= 10'd0;
+		read_timeout_cnt <= 24'd0;
 	end
 	else
 		case(state)
@@ -119,8 +125,11 @@ begin
 				//wait for  instruction
 				if(cmd_req == 1'b1)
 					state <= S_CMD_PRE;
-				else if(block_read_req == 1'b1)
-					state <= S_READ_WAIT;
+			else if(block_read_req == 1'b1)
+			begin
+				state <= S_READ_WAIT;
+				read_timeout_cnt <= 24'd0;
+			end
 				else if(block_write_req == 1'b1)
 					state <= S_WRITE_TOKEN;
 				clk_div <= spi_clk_div;
@@ -212,11 +221,20 @@ begin
 			end
 			S_READ_WAIT:
 			begin
+				read_timeout_cnt <= read_timeout_cnt + 24'd1;
 				if(spi_wr_ack == 1'b1 && data_recv == 8'hfe)
 				begin
 					spi_wr_req <= 1'b0;
 					state <= S_READ;
 					byte_cnt <= 16'd0;
+					read_timeout_cnt <= 24'd0;
+				end
+				else if(read_timeout_cnt > READ_TIMEOUT_MAX)
+				begin
+					// 等待数据起始令牌 0xFE 超时(卡未响应) -> 报错返回, 由上层跳过本扇区
+					state <= S_ERR;
+					spi_wr_req <= 1'b0;
+					read_timeout_cnt <= 24'd0;
 				end
 				else
 				begin
@@ -226,6 +244,7 @@ begin
 			end
 		S_READ:
 		begin
+			read_timeout_cnt <= read_timeout_cnt + 24'd1;
 			if(spi_wr_ack == 1'b1)
 			begin
 				// 块读：收 512 字节数据 + 2 字节 CRC，byte_cnt 从 0 数到 513 结束
@@ -234,11 +253,21 @@ begin
 						state <= S_READ_ACK;
 						spi_wr_req <= 1'b0;
 						byte_cnt <= 16'd0;
+						read_timeout_cnt <= 24'd0;
 					end
 					else
 					begin
 						byte_cnt <= byte_cnt + 16'd1;
 					end
+			end
+			else
+			begin
+				if(read_timeout_cnt > READ_TIMEOUT_MAX)
+				begin
+					// 收 512B 过程中卡停发 -> 报错返回
+					state <= S_ERR;
+					spi_wr_req <= 1'b0;
+					read_timeout_cnt <= 24'd0;
 				end
 				else
 				begin
@@ -246,6 +275,7 @@ begin
 					send_data <= 8'hff;
 				end
 			end
+		end
 			S_WRITE_TOKEN:
 				if(spi_wr_ack == 1'b1)
 				begin

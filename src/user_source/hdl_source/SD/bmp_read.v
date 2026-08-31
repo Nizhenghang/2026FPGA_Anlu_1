@@ -29,6 +29,7 @@ module bmp_read(
 
     // 按指定扇区加载一张图到 SDRAM
     input                       load_start,
+    input                       load_abort,      // 上层 1 秒超时强制中止信号
     input  [31:0]               load_sector,
 
     input                       sd_init_done,
@@ -224,7 +225,7 @@ always @(posedge clk or posedge rst) begin
         scan_found_total  <= 3'd0;
         scan_sector       <= 32'd0;
         load_sector_latched <= 32'd0;
-    end else if (!sd_init_done) begin
+    end else if (!sd_init_done || load_abort) begin
         state             <= ST_IDLE;
         state_code        <= 4'd0;
         sd_sec_read       <= 1'b0;
