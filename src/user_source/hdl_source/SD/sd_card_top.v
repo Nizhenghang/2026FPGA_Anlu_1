@@ -15,9 +15,9 @@
 module sd_card_top
 #(
 	parameter  SPI_LOW_SPEED_DIV = 248,         // SD card low speed mode frequency division parameter,spi clk speed = clk speed /((SPI_LOW_SPEED_DIV + 2) * 2 )
-	parameter  SPI_HIGH_SPEED_DIV = 4           // 高速读卡 SPI 分频: clk/((4+2)*2)=clk/12≈8.3MHz@100MHz
-	                                            // 默认 0=25MHz 对部分 TF 卡在 SPI 读块时收不到 0xFE 令牌而卡死
-	                                            // (S_READ_WAIT 无超时保护, 时钟过快必挂), 降到 8.3MHz 兼容性更好
+	parameter  SPI_HIGH_SPEED_DIV = 0           // 高速读卡 SPI 分频: clk/((0+2)*2)=clk/4=25MHz@100MHz
+	                                            // 与参考例程 lab_ex4_tf 一致; 现已在 sd_card_cmd.S_READ_WAIT/S_READ
+	                                            // 加 100ms 读超时保护, 25MHz 收不到 0xFE 令牌时自动跳扇区续扫, 不会卡死
 )
 (
 	input            clk,
