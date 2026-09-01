@@ -1,28 +1,4 @@
 
-// ============================================================================
-// 文件：top_tf_hdmi_audio.v
-// 工程：2026Anlu1 — 基于安路 EG4S20(HX4S20C) 的 HDMI 1.4b 多媒体播放系统
-// 功能：系统顶层。把"TF卡读图 → SDRAM双缓冲 → HDMI视频+音频"整条链路串起来
-//
-// 像素数据流：
-//   TF卡(SPI) --BMP解析--> sd_card_bmp(写请求/写数据)--写--> frame_read_write
-//     --> SDRAM(U3) --读--> video_timing_data + video_delay --> vout_data(24bit RGB)
-//     --> video_rgb_to_axis_640x480(打包成AXIS) --> hdmi发射核(加密 .enc.v)
-//     --> hdmi_phy_wrapper(10:1串行化) --> 板载 HDMI_B 接口(TMDS差分输出)
-//
-// 音频数据流：
-//   hdmi_audio_tone_i2s_64fs(内部八音阶测试音, I2S格式) --> I2S_receiver(解串24bit)
-//     --> audio_arc_calculate(算 ACR: CTS/N) --> hdmi发射核"音频数据岛" --> TMDS
-//
-// 三个时钟域（由三个PLL产生，详见下方例化）：
-//   clk(50MHz 板载晶振)
-//     ├─ sys_pll       --> sd_card_clk(100MHz) / ext_mem_clk(125MHz, 相位微调)
-//     ├─ video_pll      --> video_clk(25MHz 像素时钟) / hdmi_5x_clk(125MHz 串行)
-//     └─ PLL_HDMI_AUDIO --> audio_mclk(12.288MHz 音频主时钟)
-//
-// 交互：key1=手动下一张；key2=自动轮播开关(1Hz)
-// 调试：数码管 seg 显示 SD 卡状态码 state_code（0=空闲/扫描中, 其它见 sd_card_bmp）
-// ============================================================================
 module top(
     input                       clk,
     input                       rst_n,
@@ -55,6 +31,8 @@ parameter BUSRT_BITS    = 10;
 parameter FRAME_PIXELS  = 24'd307200;   // 640*480
 parameter BUF0_ADDR     = 24'd0;
 parameter BUF1_ADDR     = FRAME_PIXELS;
+parameter BUF2_ADDR     = 24'd614400;
+parameter BUF3_ADDR     = 24'd921600;
 
 wire Sdr_init_done;
 wire Sdr_init_ref_vld;
@@ -133,9 +111,7 @@ wire [9:0]  tmds_ch1_data;
 wire [9:0]  tmds_ch2_data;
 wire [9:0]  tmds_clk_data;
 
-// 统一复位：图像链路(TF/SDRAM/video) + 音频链路 共用一个复位 rst_all。
-// 关键：必须等音频 PLL 也锁定(audio_pll_lock=1)才释放复位，
-// 否则音频链路在时钟未稳时会输出错误数据，导致 HDMI 音频数据岛异常。
+// 统一复位：TF 图像链路 + HDMI 音频链路
 wire rst_all;
 assign rst_all = ~rst_n | ~audio_pll_lock;
 
@@ -271,8 +247,8 @@ frame_read_write #(
     .read_finish       (),
     .read_addr_0       (BUF0_ADDR),
     .read_addr_1       (BUF1_ADDR),
-    .read_addr_2       (24'd0),
-    .read_addr_3       (24'd0),
+    .read_addr_2       (BUF2_ADDR),
+    .read_addr_3       (BUF3_ADDR),
     .read_addr_index   (disp_buf_idx),
     .read_len          (FRAME_PIXELS),
     .read_en           (video_read_en),
@@ -289,8 +265,8 @@ frame_read_write #(
     .write_finish      (frame_write_finish),
     .write_addr_0      (BUF0_ADDR),
     .write_addr_1      (BUF1_ADDR),
-    .write_addr_2      (24'd0),
-    .write_addr_3      (24'd0),
+    .write_addr_2      (BUF2_ADDR),
+    .write_addr_3      (BUF3_ADDR),
     .write_addr_index  (write_buf_idx),
     .write_len         (FRAME_PIXELS),
     .write_en          (sd_card_write_en),

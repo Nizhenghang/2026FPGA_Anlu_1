@@ -1,10 +1,3 @@
-// ============================================================================
-// 文件：SD/video_timing_data.v
-// 功能：产生视频时序(hs/vs/de) 并在每帧开始时发起"读一帧"请求(read_req)
-// 结构：例化 color_bar 产生基准时序(hs/vs/de)，本模块再打 2 拍延迟后输出；
-//       在 VS 下降沿(video_vs_d0 & ~video_vs)拉高 read_req 一拍(通知 frame_read_write 读新帧)
-// 说明：read_req 的 ack 来自 frame_read_write(read_req_ack)，形成"每帧读一次"的节拍
-// ============================================================================
 module video_timing_data
 #(
 	parameter DATA_WIDTH = 16                       // Video data one clock data width

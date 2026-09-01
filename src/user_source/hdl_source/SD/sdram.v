@@ -9,13 +9,6 @@
 
 `include "../user_source/hdl_source/include/global_def.v"
 
-// ---------------------------------------------------------------------------
-// 本文件作用（2026Anlu1）：用户自写的 SDRAM 控制器封装(wrapper)
-//   - 例化安路加密核 sdr_as_ram(异步 FIFO 接口的 SDRAM 控制器) + 物理 IP EG_PHY_SDRAM_2M_32
-//   - 对外提供 App_* 用户接口(App_wr_*/App_rd_*)，供 frame_read_write 调用
-//   - SDR_CKE 固定拉高(使能时钟)；self_refresh_open=1 开启控制器自动刷新
-//   物理 SDRAM 规格：2M x 32bit = 8MB（详见 EG_PHY_SDRAM_2M_32）
-// ---------------------------------------------------------------------------
 module sdram(
     `ifdef SIMULATION
 	output					SDRAM_CLK,

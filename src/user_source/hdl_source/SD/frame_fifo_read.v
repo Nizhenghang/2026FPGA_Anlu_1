@@ -1,14 +1,4 @@
 `timescale 1ns/1ps
-// ============================================================================
-// 文件：SD/frame_fifo_read.v
-// 功能：帧读状态机 —— 从 SDRAM 以突发方式读出一帧，送入异步 FIFO(rfifo) 供视频显示
-// 关键特性：
-//   - 读请求来自 read_clk(=video_clk)域，用 3 级打拍(read_req_d0/d1/d2)同步到 mem_clk 域防亚稳态
-//   - 突发读：每次 128 个 32bit(BURST_SIZE)，S_CHECK_FIFO 检查 FIFO 有空间才发起
-//   - Sdr_init_done 之后才允许读(避免 SDRAM 初始化未完成时读非法地址)
-// 状态机：S_IDLE -> S_ACK -> S_CHECK_FIFO -> S_READ_BURST -> S_READ_BURST_END -> S_END
-// 注意：读结束(rd_burst_finish)要在发完读指令后等 10 个时钟(读延迟 rd_delay)才有效
-// ============================================================================
 module frame_fifo_read
 #
 (

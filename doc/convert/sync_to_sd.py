@@ -113,7 +113,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # 确定源文件夹
-    current_dir = os.path.dirname(os.path.abspath(__file__))
+    current_dir = os.path.dirname(os.path.abspath(__name__))
     source_dir = args.source if args.source else os.path.join(current_dir, "output_bmp")
 
     print("="*50)

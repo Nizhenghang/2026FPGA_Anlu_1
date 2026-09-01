@@ -1,13 +1,5 @@
 
 
-// ============================================================================
-// 文件：video_source_test.v
-// 功能：测试图案发生器(TPG) —— 生成渐变彩条 AXI-Stream 视频，用于调试/验证 HDMI 链路
-// 说明：本工程实际显示源是 SDRAM 读出的 BMP 图，此模块为独立测试激励(参数默认 1920x1080，
-//       可通过 parameter 改分辨率)；顶层未例化它，可作为 HDMI 显示自检备用
-// 原理：按 HTOTAL/VTOTAL 计数行列，active 区(valid)内输出递增的 8bit 测试数据(S_tpg_data)，
-//       产生 user(SOF)/valid/last 三信号供发射核
-// ============================================================================
 module video_source_test #(
     parameter HTOTAL  = 2200,
     parameter HACTIVE = 1920,

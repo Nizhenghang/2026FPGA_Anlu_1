@@ -1,87 +1,178 @@
-# 2026FPGA_Anlu_1
+# 2026 FPGA Anlu 赛题一：基于 EG4S20 的 HDMI 多媒体播放系统
 
-基于安路科技 **EG4S20BG256**（康芯 HX4S20C 开发板）的 **HDMI 1.4b 多媒体播放系统**——2026 全国大学生嵌入式芯片与系统设计竞赛·安路赛道参赛项目（基础版本）。
+本项目面向 2026 安路赛道 FPGA 赛题一，目标是在 HX4S20C 开发板上，基于安路 EG4S20 FPGA 实现一个 HDMI 多媒体播放与展示系统。当前工程已经完成 TF 卡 BMP 图片读取、SDRAM 帧缓存、HDMI 1.4b 视频显示、基础 HDMI 音频输出、按键交互与 SD 卡同步辅助工具，后续将在此基础上继续扩展图层叠加、转场、OSD 和音频可视化等展示能力。
 
-本设计在安路官方设计参考例程（例程 5）基础上改编，实现一条完整的音视频播放链路：
-**TF 卡读取 BMP → SDRAM 双缓冲帧缓存 → HDMI 1.4b 视频显示（640×480@60, RGB）+ HDMI 音频输出（48 kHz）**。
+## 硬件平台
 
----
+- 开发板：HX4S20C
+- FPGA：Anlogic EG4S20
+- 显示输出：HDMI_B
+- 存储介质：TF / Micro SD 卡，建议 FAT32
+- 推荐显示设备：支持 HDMI 音视频输入的电视或带扬声器显示器；也可使用 HDMI 显示器加外接音箱
 
-## 一、已实现功能（对照比赛基础要求）
+## 当前已实现内容
 
-| 基础要求 | 状态 | 说明 |
-|---|---|---|
-| 核心功能完整性 | ✅ | TF(SPI/FAT32) 读取 BMP（最多 4 张）、SDRAM 双缓冲、HDMI 1.4b 视频、按键交互（key1 切换 / key2 自动轮播） |
-| 显示稳定性与鲁棒性 | ✅(设计) | 双缓冲无缝切换（切图不黑屏）、上电 POR（PLL 全锁后启动）、SD 卡 1 s 超时防死锁 |
-| 基础音频输出 | ✅ | I2S 八音阶测试音（48 kHz）→ HDMI 音频数据岛包（ACR N=6144） |
-| 系统工程规范性 | ✅ | 模块化分层、引脚(pin.adc)与时序(timing.sdc)约束完整、复用官方 HDMI 发射 IP 核 |
+### 1. TF 卡 BMP 图片读取与扫描
 
-> 注：建立时序在 125 MHz 域（SDRAM 接口 / HDMI 串行）存在负 slack（SWNS≈−6.7 ns），TD 默认不阻塞 bit 流生成；实板表现需上板实测，必要时开启 `timing.sdc` 跨时钟域异步分组收时序。
+- 通过 SPI 方式读取 TF 卡内容。
+- 在 FAT32 卷内自动扫描 BMP 图片资源。
+- 支持最多 4 张合法 BMP 图片自动发现与加载。
+- 支持 640 x 480、24-bit RGB、非压缩 BMP 图片。
+- 对异常图片、截断图片或非预期数据加入超时保护，避免底层状态机长时间卡死。
 
----
+### 2. SDRAM 帧缓存与多缓冲显示
 
-## 二、本仓库已自包含（含安路第三方 IP，重要）
+- 使用片上工程中的 SDRAM IP 作为帧缓存。
+- 当前按 640 x 480 图像帧组织缓存空间。
+- 使用多个帧缓冲区地址保存不同图片帧。
+- 写入缓冲区与显示缓冲区分离，降低切图过程中的显示中断风险。
+- 首图未加载完成前输出黑屏，图片提交后显示当前有效缓存。
 
-为便于团队协作与**直接综合**，本仓库已一并纳入安路科技（Anlogic）专有 IP 与官方资料。
-这些组件的版权仍归安路科技所有，仅随本仓库分发供**团队内部学习与 2026 安路赛道竞赛开发**使用；
-对外公开分发前请自行确认安路授权条款与赛事规则（详见 `NOTICE`）。
+### 3. HDMI 1.4b 视频输出
 
-- **加密网表核（`*.enc.v`）**
-  - HDMI 1.4b 发射核 APUG092：`src/user_source/hdl_source/hdmi1.4b_transmitter_core/hdmi_1_4b_transmitter_core_wrapper.enc.v`
-  - SDRAM 控制器：`src/user_source/hdl_source/include/sdr_as_ram.enc.v`、`sdr_init_ref.enc.v`、`sdr_wrrd.enc.v`
-- **TD 生成 IP（`*.vhd`）**：`src/td_project/al_ip/`、`src/user_source/hdl_source/IP/`、`src/user_source/ip_source/` 下的 PLL / SDRAM / AFIFO / 音频 ROM 等
-- **安路官方参考文档**：`doc/` 目录、`设计参考例程文档.md` / `.docx`
+- 基于 APUG092 HDMI 1.4b Transmitter IP 输出视频。
+- 当前输出分辨率为 640 x 480 @ 60 Hz。
+- RGB 视频数据经 `video_rgb_to_axis_640x480` 转换为 AXI-Stream 后输入 HDMI 发射核。
+- 使用 `hdmi_phy_wrapper` 将 TMDS 数据串行化并输出到 HDMI_B 差分接口。
+- 上电后自动触发 EDID 读取。
 
-> 说明：仓库**不包含**综合产物（`*_Runs/`、生成 bit 流 `*.bit`、构建日志 `*.log/.logw`），
-> 同学 clone 后需用 TD 在本机重新综合。本地记忆 `.workbuddy/` 也不入库（含个人隐私）。
+### 4. HDMI 基础音频输出
 
----
+- 使用 `PLL_HDMI_AUDIO` 产生 12.288 MHz 音频主时钟。
+- 在 FPGA 内部生成 I2S 测试音。
+- 使用 `I2S_receiver` 解串为左右声道 24-bit PCM 数据。
+- 使用 `audio_arc_calculate` 生成 HDMI ACR 参数。
+- 将音频样本与视频一起送入 HDMI 1.4b 发射核，实现 HDMI_B 音视频同步输出。
 
-## 三、目录结构（纳入仓库的部分）
+### 5. 按键交互与状态显示
 
-```
+- `key1`：手动切换到下一张已扫描到的 BMP 图片。
+- `key2`：开启或关闭自动轮播。
+- 数码管显示 SD 卡状态码，便于调试 SD 初始化、扫描和读取流程。
+
+### 6. 图片转换与 SD 卡同步工具
+
+`doc/convert` 中提供了辅助脚本：
+
+- `convert_images_to_bmp.py`：将 JPG、PNG、WebP、GIF、BMP 等常见格式转换为工程要求的 640 x 480、24-bit、非压缩 BMP。
+- `sync_to_sd.py`：将转换后的 BMP 安全同步到 SD 卡，并处理旧 BMP 物理扇区残留导致 FPGA 误读的问题。
+
+## 目录结构
+
+```text
 .
-├── .gitignore
-├── LICENSE                 # 用户自写代码以 MIT 发布
-├── NOTICE                  # 第三方 IP 归属声明
 ├── README.md
-├── 代码说明.md             # 工程说明（自写）
-└── src/
-    ├── td_project/
-    │   └── HDMI1.4b_Transmitter_v1.0.al   # TD 工程文件
-    └── user_source/
-        ├── constraints_source/
-        │   ├── pin.adc        # 引脚约束
-        │   └── timing.sdc     # 时序约束
-        ├── hdl_source/
-        │   ├── top_tf_hdmi_audio.v         # 顶层
-        │   ├── SD/                         # TF 卡 / BMP / 双缓冲 / 数码管
-        │   ├── IP/                         # 用户封装的 SDRAM/AFIFO/PLL _wrapper(.v)
-        │   ├── include/global_def.v
-        │   ├── rom/
-        │   ├── test/
-        │   └── *.v                         # 音频/视频/PHY 等自写模块
-        └── ip_source/pll.v
+├── 代码说明.md
+├── 设计参考例程文档.md
+├── 设计参考例程文档.docx
+├── doc
+│   ├── APUG092_HDMI1.4b_Transmitter_V1.0.docx
+│   ├── TF卡图片
+│   └── convert
+└── src
+    ├── td_project
+    └── user_source
+        ├── constraints_source
+        ├── hdl_source
+        └── ip_source
 ```
 
----
+主要 HDL 代码位于：
 
-## 四、构建与运行
+```text
+src/user_source/hdl_source
+```
 
-1. 安装 **Anlogic TD**（建议与例程同源版本）。本仓库已含 EG4S20 IP 包所需的 `*.enc.v` 加密核与 `*.vhd` 生成 IP，**无需另行获取**。
-2. 用 TD 打开 `src/td_project/HDMI1.4b_Transmitter_v1.0.al`。
-3. 综合 → 实现 → 生成 bit 流，下载至 HX4S20C。
-4. HDMI 线接开发板 **HDMI_B** 接口连接显示器；TF 卡放入符合要求的 24-bit 非压缩 BMP（640×480，可直接用 `doc/TF卡图片` 中的测试图，或用 `doc/convert/` 脚本转换自己的图片）。
+Anlogic TD 工程文件位于：
 
-> 注：综合产物与日志未纳入版本管理，每次在本机重新综合即可。
+```text
+src/td_project/HDMI1.4b_Transmitter_v1.0.al
+```
 
----
+约束文件位于：
 
-## 五、许可证
+```text
+src/user_source/constraints_source
+```
 
-- 本仓库中的**用户自写代码**（全部 `.v`、约束文件、说明文档）以 **MIT 许可证**发布，见 `LICENSE`。
-- 安路科技第三方 IP 与官方文档版权归安路科技所有，须遵守其相应授权条款，不在本仓库许可范围内。
+## 最简复现步骤
 
----
+1. 使用 FAT32 格式化 TF 卡。
+2. 将 `doc/TF卡图片` 中的 BMP 示例图片复制到 TF 卡根目录，或使用 `doc/convert` 中的脚本生成并同步图片。
+3. 将 TF 卡插入开发板。
+4. 将 HDMI 线连接到开发板的 HDMI_B 接口，并连接显示器或电视。
+5. 使用 Anlogic TD 打开 `src/td_project/HDMI1.4b_Transmitter_v1.0.al`。
+6. 综合、布局布线并下载 bit 流到 FPGA。
+7. 首图加载完成后，显示器应显示图片；若显示设备支持 HDMI 音频，应能听到测试音。
+8. 使用 `key1` 手动切换图片，使用 `key2` 开启或关闭自动轮播。
 
-© 2026 Nizhenghang
+## TF 卡图片要求
+
+```text
+格式：BMP
+分辨率：640 x 480
+颜色：24-bit RGB
+压缩：非压缩
+建议文件系统：FAT32
+```
+
+注意：
+
+- 不能直接把 PNG 或 JPG 改后缀为 `.bmp`。
+- 建议使用 `doc/convert/convert_images_to_bmp.py` 统一转换图片。
+- 若 FPGA 端读到旧图片或异常图片，建议使用 `doc/convert/sync_to_sd.py` 重新同步 SD 卡。
+
+## 后续实现方向
+
+### 1. 图层叠加与字幕 / OSD
+
+- 在图片播放基础上叠加文字层。
+- 显示时间戳、作品标语、当前图片编号、自动播放状态等信息。
+- 支持 OSD 参数提示，例如亮度、对比度、播放模式。
+
+### 2. 图片轮播转场
+
+- 在当前直接切换的基础上加入淡入淡出、滑动等过渡效果。
+- 尽量保证切换过程画面连续、无明显撕裂或黑屏。
+- 结合多缓冲机制优化转场期间的读写调度。
+
+### 3. 图片缩放与自适应显示
+
+- 支持读取不同分辨率 BMP 图片。
+- 在 FPGA 内完成缩放或居中显示。
+- 后续可比较最近邻、线性插值等不同缩放策略的资源占用与显示质量。
+
+### 4. 实时参数调节
+
+- 使用板载按键或拨码开关调节亮度、对比度、播放速度等参数。
+- 在画面上实时叠加参数变化提示。
+- 将交互控制与显示链路做成更完整的演示系统。
+
+### 5. 音频可视化
+
+- 从音频样本中提取波形或频谱特征。
+- 将波形条、频谱柱或节奏提示叠加到视频画面。
+- 形成音视频联动展示效果，提升赛题展示区分度。
+
+### 6. 工程规范化
+
+- 继续整理模块接口文档和时钟域说明。
+- 增加关键模块仿真用例。
+- 固化 TF 卡图片制作流程和现场演示检查清单。
+- 对异常卡、异常图片、HDMI 兼容性和复位时序进行更系统的鲁棒性测试。
+
+## 当前核心模块参考
+
+- `top_tf_hdmi_audio.v`：系统顶层，连接 TF 卡读取、SDRAM、视频时序、HDMI 发射和音频链路。
+- `SD/sd_card_bmp.v`：BMP 扫描、图片加载和切换控制。
+- `SD/bmp_read.v`：BMP 扇区读取与像素解析。
+- `SD/frame_read_write.v`：SDRAM 帧缓存读写控制。
+- `SD/video_timing_data.v`：640 x 480 视频时序生成。
+- `video_rgb_to_axis_640x480.v`：RGB/DE 视频转换为 AXI-Stream。
+- `hdmi_audio_tone_i2s_64fs.v`：内部 I2S 测试音生成。
+- `I2S_receiver.v`：I2S 音频解串。
+- `audio_arc_calculate.v`：HDMI ACR 参数计算。
+
+## 备注
+
+本项目遵循赛题要求：算法、控制逻辑和数据处理流程尽量在 FPGA 内自主实现。后续如需使用外围模块，应避免引入额外处理器参与控制或算法预处理。

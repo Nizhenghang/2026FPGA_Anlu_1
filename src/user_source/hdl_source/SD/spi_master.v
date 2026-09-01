@@ -1,14 +1,4 @@
 
-// ============================================================================
-// 文件：SD/spi_master.v
-// 功能：SPI 主设备字节收发（最底层物理层）
-// 协议：CPOL=1, CPHA=1（SD 卡 SPI 模式要求），MSB 先发送
-// 接口：wr_req 拉高请求发送 1 字节(data_in)；wr_ack 拉高表示本字节收发完成；
-//       data_out 返回收到的 1 字节；nCS_ctrl 由上层控制片选
-// 状态机：IDLE -> DCLK_IDLE(等半个 SPI 周期) -> DCLK_EDGE(产生时钟边沿, 共16边沿)
-//         -> LAST_HALF_CYCLE -> ACK -> ACK_WAIT -> IDLE
-// 时钟分频：clk_div 决定 1 个 SPI bit 占用多少个 sys_clk 周期(值越大 SPI 越慢)
-// ============================================================================
 module spi_master
 (
 	input                       sys_clk,
@@ -95,8 +85,8 @@ begin
 		DCLK_reg <= 1'b0;
 	else if(state == IDLE)
 		DCLK_reg <= CPOL;
-        else if(state == DCLK_EDGE)
-            DCLK_reg <= ~DCLK_reg;//SPI clock edge：在边沿状态翻转一次，形成 SPI 时钟
+	else if(state == DCLK_EDGE)
+		DCLK_reg <= ~DCLK_reg;//SPI clock edge
 end
 //SPI clock wait counter
 always@(posedge sys_clk or posedge rst)

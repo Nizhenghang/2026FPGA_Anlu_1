@@ -1,7 +1,0 @@
-select disk 2
-detail disk
-clean
-create partition primary
-format fs=fat32 quick
-assign letter=F
-exit

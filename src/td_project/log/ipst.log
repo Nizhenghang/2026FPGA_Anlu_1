@@ -1,0 +1,12 @@
+#[INFO] IpTool V2025.08 (APP main), Windows 64bit (Release), Build 171484 2025/08/11, 10:43:30 Aug 11 2025 on WIN10-204
+#[INFO] Run at Tue Sep  1 10:22:24 2026
+
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/src/td_project/al_ip/PLL_HDMI_AUDIO.ipc
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/src/td_project/al_ip/PLL.ipc
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/src/td_project/al_ip/AUDIO_SAMPLE_ROM.ipc
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/src/td_project/../user_source/hdl_source/ip/afifo_16_32_256.ipc
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/src/td_project/../user_source/hdl_source/ip/afifo_32_16_256.ipc
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/src/td_project/../user_source/hdl_source/ip/sys_pll.ipc
+#[INFO] Load ipc data success from D:/Nizhenghang/Project/2026Anlu1/src/td_project/../user_source/hdl_source/ip/video_pll.ipc
+ipst_gui_select_dialog IP_Status
+ipst_gui_close_dialog IP_Status

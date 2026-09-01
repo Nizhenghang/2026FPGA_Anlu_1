@@ -1,0 +1,331 @@
+Table of Contents
+-----------------
+1. checking no clock(0) (HIGH)
+2. checking clock definition(0) (HIGH)
+3. checking dummy node(3) (HIGH)
+4. checking invalid constraint(0) (HIGH)
+5. checking pll/clock buffer clock constraints(0) (HIGH)
+6. checking combinational loops(0) (HIGH)
+7. checking soft fifo timing exception constraints(0) (HIGH)
+8. checking no path constraints(0) (MEDIUM)
+9. checking shadowed/ignored timing exception constraints(0) (MEDIUM)
+10. checking no input delay(5) (MEDIUM)
+11. checking no output delay(23) (MEDIUM)
+12. checking partial input delay(0) (MEDIUM)
+13. checking partial output delay(0) (MEDIUM)
+14. checking abnormal input delay(32) (MEDIUM)
+
+
+1. checking nets with no clock driven. (HIGH)
+---------------------------------------------
+2. checking clock definition problems. (HIGH)
+---------------------------------------------
+2.1 There are 0 leaf clock pins driven by multiple clocks. (HIGH)
+
+
+2.2 There are 0 clocks created on internal clock network. (HIGH)
+
+
+2.3 There are 0 unexpandable clock sets. (HIGH)
+
+
+2.4 There are 0 local clocks. (HIGH)
+
+
+2.5 There are 0 generated clocks that are not connected to their master clocks. (HIGH)
+
+
+3. checking dummy nodes. (HIGH)
+---------------------------------------------
+There are 3 nodes are dangling. (HIGH)
+
+DummyNode in Model: EG_PHY_LSLICE
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2374.a[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2377.a[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2378.a[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2374.b[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2377.b[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2378.b[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2219.c[1]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2219.d[1]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2219.b[1]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2374.d[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2377.d[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2378.d[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2374.c[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2377.c[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2378.c[0]
+	sd_card_bmp_m0/bmp_read_m0/bpb_sec_per_cluster_reg[3]_syn_10.mi[1]
+	sd_card_bmp_m0/bmp_read_m0/bpb_sec_per_cluster_reg[1]_syn_9.mi[1]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2374.mi[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2377.mi[0]
+	sd_card_bmp_m0/bmp_read_m0/sel18_syn_2378.mi[0]
+	sd_card_bmp_m0/bmp_read_m0/sd_sec_read_addr_b[16]_syn_14.mi[0]
+	u_hdmi_1_4b_transmitter_core_wrapper/u_hdmi_tx_controller_wrapper/u_hdmi_island_data_gen/sel4_syn_1771.mi[0]
+	u_audio_arc_calculate/S_audio_div_cnt_reg[1]_syn_7.mi[0]
+	u_I2S_receiver/I_clk_syn_1038.mi[0]
+	sd_card_bmp_m0/next_load_idx_reg[1]_syn_12.mi[0]
+
+DummyNode in Model: EG_PHY_MSLICE
+	sd_card_bmp_m0/bmp_read_m0/bpb_sec_per_cluster_reg[5]_syn_4.mi[1]
+	sd_card_bmp_m0/bmp_read_m0/bpb_sec_per_cluster_reg[5]_syn_5.mi[1]
+	sd_card_bmp_m0/bmp_read_m0/bpb_sec_per_cluster_reg[5]_syn_3.mi[0]
+	u_I2S_receiver/S_right_shift_data_reg[49]_syn_4.d[1]
+	u_I2S_receiver/S_right_shift_data_reg[46]_syn_4.d[0]
+	u_I2S_receiver/S_right_shift_data_reg[49]_syn_4.c[1]
+	u_I2S_receiver/S_right_shift_data_reg[46]_syn_4.c[0]
+
+DummyNode in Model: EG_PHY_PAD
+	seg_data[7]_syn_1.opad
+	U3/sdram_syn_5.opad
+	U3/sdram_syn_10.opad
+
+4. checking invalid constraints. (HIGH)
+---------------------------------------------
+There are 0 invalid constraints. (HIGH)
+
+
+5. checking PLL/buffer clocks. (HIGH)
+---------------------------------------------
+PLL/buffer inst: sys_pll_m0/pll_inst
+{
+	There are 0 clock pins that have no clock constraints. (HIGH)
+
+
+	There are 0 clocks whose clock frequency do not match the PLL setting. (HIGH)
+
+
+}
+
+PLL/buffer inst: u_audio_pll/pll_inst
+{
+	There are 0 clock pins that have no clock constraints. (HIGH)
+
+
+	There are 0 clocks whose clock frequency do not match the PLL setting. (HIGH)
+
+
+}
+
+PLL/buffer inst: video_pll_m0/pll_inst
+{
+	There are 0 clock pins that have no clock constraints. (HIGH)
+
+
+	There are 0 clocks whose clock frequency do not match the PLL setting. (HIGH)
+
+
+}
+
+6. checking combinational loops. (HIGH)
+---------------------------------------------
+There are 0 combinational loops. (HIGH)
+
+
+7. checking soft fifo set_max_delay constraints. (HIGH)
+---------------------------------------------
+There are 0 max-delay datapath-only paths that are part of the provided async clock paths, whereas the timing between other registers is not relaxed or ignored. (HIGH)
+
+
+8. checking no path constraints. (MEDIUM)
+---------------------------------------------
+There are 0 constraints that have no timing paths. (MEDIUM)
+
+
+9. checking path exception constraints shadowed/ignored by other constraints. (MEDIUM)
+---------------------------------------------
+
+MCP/SMD Summary
+--------------------
+
+		Max Check
+		--------------------
+		     Total    Dominated     Shadowed      Ignored   Constraint
+		        36           36            0            0   set_max_delay -from [get_regs -nowarn {*/primary_addr_gray_reg[*]}] -to [get_regs -nowarn {*/sync_r1[*]}] -datapath_only 7.700
+		        36           36            0            0   set_max_delay -from [get_regs -nowarn {*/primary_addr_gray_reg[*]}] -to [get_regs -nowarn {*/sync_r1[*]}] -datapath_only 7.700
+
+		Min Check
+		--------------------
+		     Total    Dominated     Shadowed      Ignored   Constraint
+
+10. checking no input delay (MEDIUM)
+--------------------------
+There are 5 input ports that with no input delay specified. (MEDIUM)
+
+	HDMI_DDC_SDA
+	key1
+	key2
+	rst_n
+	sd_miso
+
+11. checking no output delay (MEDIUM)
+--------------------------
+There are 23 output ports that with no output delay specified. (MEDIUM)
+
+	HDMI_CLK_P
+	HDMI_D0_P
+	HDMI_D1_P
+	HDMI_D2_P
+	HDMI_DDC_SCL
+	HDMI_DDC_SDA
+	sd_dclk
+	sd_mosi
+	sd_ncs
+	seg_data[7]
+	seg_data[6]
+	seg_data[5]
+	seg_data[4]
+	seg_data[3]
+	seg_data[2]
+	seg_data[1]
+	seg_data[0]
+	seg_sel[5]
+	seg_sel[4]
+	seg_sel[3]
+	seg_sel[2]
+	seg_sel[1]
+	seg_sel[0]
+
+12. checking partial input delay (MEDIUM)
+--------------------------
+There are 0 input ports with partial input delay specified. (MEDIUM)
+
+
+13. checking partial output delay (MEDIUM)
+--------------------------
+There are 0 output ports with partial output delay specified. (MEDIUM)
+
+
+14. checking abnormal set_input_delay constraints. (MEDIUM)
+---------------------------------------------
+There are 32 abnormal set_input_delay constraints. (MEDIUM)
+
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[31]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[31]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[31]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[31]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[30]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[30]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[30]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[30]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[29]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[29]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[29]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[29]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[28]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[28]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[28]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[28]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[27]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[27]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[27]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[27]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[26]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[26]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[26]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[26]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[25]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[25]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[25]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[25]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[24]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[24]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[24]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[24]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[23]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[23]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[23]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[23]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[22]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[22]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[22]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[22]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[21]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[21]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[21]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[21]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[20]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[20]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[20]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[20]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[19]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[19]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[19]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[19]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[18]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[18]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[18]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[18]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[17]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[17]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[17]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[17]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[16]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[16]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[16]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[16]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[15]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[15]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[15]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[15]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[14]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[14]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[14]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[14]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[13]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[13]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[13]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[13]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[12]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[12]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[12]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[12]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[11]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[11]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[11]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[11]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[10]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[10]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[10]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[10]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[9]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[9]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[9]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[9]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[8]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[8]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[8]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[8]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[7]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[7]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[7]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[7]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[6]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[6]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[6]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[6]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[5]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[5]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[5]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[5]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[4]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[4]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[4]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[4]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[3]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[3]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[3]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[3]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[2]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[2]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[2]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[2]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[1]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[1]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[1]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[1]} ]
+	 set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -max 5.000 [ get_pins {U3/sdram.dq[0]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -fast -min 1.000 [ get_pins {U3/sdram.dq[0]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -max 5.000 [ get_pins {U3/sdram.dq[0]} ]
+ set_input_delay -clock [ get_clocks {sys_pll_m0/pll_inst.clkc[2]} ] -reference_pin [ get_pins {U3/sdram.clk} ] -slow -min 1.000 [ get_pins {U3/sdram.dq[0]} ]
+

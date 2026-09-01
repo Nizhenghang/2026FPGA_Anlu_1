@@ -10,11 +10,6 @@
  ** Date	:	2025 06 09
  ** TD version	:	5.6.119222
 \************************************************************/
-// ---------------------------------------------------------------------------
-// 本文件(2026Anlu1 项目说明)：安路 TD 生成的异步 FIFO IP（非手写，版权归 Anlogic）
-//   实际 module 名：rfifo_32_32_512（读 FIFO；文件名 afifo_32_16_256.v 与 module 名不一致）
-//   用途：frame_read_write 的读通道异步 FIFO，跨 mem_clk 与 read_clk(video_clk) 域
-// ---------------------------------------------------------------------------
 module rfifo_32_32_512 #(parameter DATA_WIDTH_W = 32, 
         parameter DATA_WIDTH_R = 32, 
         parameter ADDR_WIDTH_W = 9, 

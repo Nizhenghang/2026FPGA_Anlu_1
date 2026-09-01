@@ -1,17 +1,4 @@
 
-////////////////////////////////////////////////////////////////////////////////
-// 模块: hdmi_audio_tone_pcm_scale
-// 功能: 并行 24bit PCM 音频测试音发生器(八音阶方波, do-re-mi-...-do)
-//       直接输出并行的 O_audio_left_data / O_audio_right_data, 而非 I2S 串行.
-// 说明: 本项目顶层实际使用的是 hdmi_audio_tone_i2s_64fs(I2S 串行发送端);
-//       本文件为备用/对比实现(并行 PCM 版), 供不需要 I2S 链路时直接使用.
-// 时钟域: I_clk (默认 25MHz, 由参数 CLK_FREQ_HZ 指定)
-// 关键算法:
-//   分数分频: S_sample_acc 每周期累加 SAMPLE_RATE_HZ, 溢出(>=CLK_FREQ_HZ)即一个
-//             48kHz 采样点 -> 产生 O_audio_valid.
-//   1bit DDS: S_phase_acc 累加 note_inc_lut(频率=inc*fs/2^32), 最高位判决 ±AMP 方波.
-//   每个音持续 NOTE_HOLD_SAMPLES(默认 24000=0.5s@48k)后切换到下一音阶.
-////////////////////////////////////////////////////////////////////////////////
 module hdmi_audio_tone_pcm_scale #(
     parameter integer CLK_FREQ_HZ       = 25_000_000,
     parameter integer SAMPLE_RATE_HZ    = 48_000,
@@ -72,12 +59,12 @@ always @(posedge I_clk or posedge I_rst) begin
             S_sample_acc  <= S_acc_add - CLK_FREQ_HZ;
             O_audio_valid <= 1'b1;
 
-            // 下一个采样点: 1bit DDS 相位累加, 最高位判决方波极性
-            S_phase_acc <= S_phase_acc + W_note_inc;  // 频率 = W_note_inc * fs / 2^32
+            // 下一个采样点
+            S_phase_acc <= S_phase_acc + W_note_inc;
             if (S_phase_acc[31])
-                S_pcm_sample <= AMP;                  // 最高位=1 -> 正半周
+                S_pcm_sample <= AMP;
             else
-                S_pcm_sample <= -AMP;                 // 最高位=0 -> 负半周
+                S_pcm_sample <= -AMP;
 
             O_audio_left_data  <= S_pcm_sample;
             O_audio_right_data <= S_pcm_sample;

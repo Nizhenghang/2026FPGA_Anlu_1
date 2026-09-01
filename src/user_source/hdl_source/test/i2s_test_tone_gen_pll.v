@@ -1,10 +1,3 @@
-////////////////////////////////////////////////////////////////////////////////
-// 模块: i2s_test_tone_gen_single_pll_fix64  (独立测试用的 I2S 测试音发送端)
-// 功能: 产生 1kHz 方波测试音, 按与 I2S_receiver 兼容的 64bit/声道帧格式串行送出.
-//       与 hdmi_audio_tone_i2s_64fs 同接口/同帧格式, 区别仅在音高固定为 TONE_HZ(1kHz)
-//       且为方波(非八音阶切换). 仅供 design_top_i2s_test_pll 测试顶层使用.
-// 时钟: I_mclk = 12.288MHz(由 PLL_HDMI_AUDIO 提供)
-////////////////////////////////////////////////////////////////////////////////
 module i2s_test_tone_gen_single_pll_fix64 #(
     parameter integer SAMPLE_RATE = 48000,
     parameter integer SAMPLE_BITS = 24,

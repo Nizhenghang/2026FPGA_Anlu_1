@@ -1,23 +1,8 @@
 
-// ============================================================================
-// 文件：SD/sd_card_top.v
-// 功能：SD 卡 SPI 模式顶层封装
-// 结构：例化三层子模块
-//   sd_card_sec_read_write — SD 卡初始化 + 扇区读写命令编排(SPI 低速/高速切换)
-//   sd_card_cmd            — 单条命令/数据块的 SPI 收发状态机
-//   spi_master             — 最底层 SPI 字节物理收发(CPOL=CPHA=1)
-// 对外接口：以"扇区(sector, 每扇区 512 字节)"为单位读写
-//   读：sd_sec_read + sd_sec_read_addr -> 输出 sd_sec_read_data(字节流) + valid + end
-//   写：sd_sec_write + 地址 + 数据(配合 sd_sec_write_data_req 握手)
-// 参数：SPI_LOW_SPEED_DIV/SPI_HIGH_SPEED_DIV 控制 SPI 时钟分频
-//       (卡初始化用低速，正常读写切高速)
-// ============================================================================
 module sd_card_top
 #(
 	parameter  SPI_LOW_SPEED_DIV = 248,         // SD card low speed mode frequency division parameter,spi clk speed = clk speed /((SPI_LOW_SPEED_DIV + 2) * 2 )
-	parameter  SPI_HIGH_SPEED_DIV = 0           // 高速读卡 SPI 分频: clk/((0+2)*2)=clk/4=25MHz@100MHz
-	                                            // 与参考例程 lab_ex4_tf 一致; 现已在 sd_card_cmd.S_READ_WAIT/S_READ
-	                                            // 加 100ms 读超时保护, 25MHz 收不到 0xFE 令牌时自动跳扇区续扫, 不会卡死
+	parameter  SPI_HIGH_SPEED_DIV = 0           // SD card high speed mode frequency division parameter,spi clk speed = clk speed /((SPI_HIGH_SPEED_DIV + 2) * 2 )
 )
 (
 	input            clk,

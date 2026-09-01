@@ -1,14 +1,5 @@
 
 `include "video_define.v"
-// ============================================================================
-// 文件：SD/color_bar.v
-// 功能：彩条测试图案时序发生器 —— 按参数化分辨率产生标准 VGA 时序 + 8 色彩条 RGB
-// 用法：通过 `define 宏选择分辨率(VIDEO_640_480 / 1280_720 / 1920_1080 等)，
-//       本工程顶层默认 640x480@25MHz(VIDEO_640_480)
-// 输出：hs/vs/de 时序 + rgb_r/g/b(8色横条：白/黄/青/绿/品红/红/蓝/黑)
-// 说明：本工程里 color_bar 由 video_timing_data 例化，仅取它的 hs/vs/de 作显示时序基准；
-//       实际像素来自 SDRAM 读出的 BMP 图(顶层 vout_data)，color_bar 的 rgb 输出悬空未接
-// ============================================================================
 module color_bar(
 	input                 clk,           //pixel clock
 	input                 rst,           //reset signal high active

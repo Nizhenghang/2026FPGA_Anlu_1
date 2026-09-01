@@ -1,19 +1,3 @@
-
-// ============================================================================
-// 文件：SD/sd_card_bmp.v
-// 功能：BMP 播放控制最高层 —— 扫描、双缓冲调度、按键轮播
-// 与 bmp_read / sd_card_top 配合，完成"上电找图 -> 加载到 SDRAM -> 切换显示"
-// 关键设计：双缓冲乒乓
-//   - write_buf_idx(正在写入的缓冲) 与 disp_buf_idx(正在显示的缓冲) 始终不同，
-//     新图写"非当前显示"的另一块，整帧写完后(write_finish_toggle 脉冲同步)才切 disp_buf_idx，
-//     因此切图瞬间无缝、不黑屏
-//   - BUF0/BUF1 物理地址见顶层参数 BUF0_ADDR/BUF1_ADDR(各 307200 像素=640*480)
-// 交互：key_next=手动下一张(消抖后单脉冲)；key_auto=自动轮播开关(1Hz)
-//   - 上电自动扫描前 4 张图(记在 img_sector0~3)，自动加载首图到 buffer0
-// 跨时钟域：write_finish_toggle 来自 ext_mem_clk 域，用 3 级打拍(wrfin_tgl_sync)
-//       做边沿检测(write_finish_pulse)再用于切显示
-// 1Hz 自动播放：auto_cnt 数到 CLK_FREQ_HZ-1 产生 auto_tick
-// ============================================================================
 module sd_card_bmp #(
     parameter integer CLK_FREQ_HZ       = 100_000_000,
     parameter [31:0]  SCAN_START_SECTOR = 32'd0,
@@ -55,47 +39,64 @@ wire             bmp_data_wr_en;
 wire [23:0]      bmp_data;
 wire             sd_init_done;
 wire             bmp_ready;
+wire [3:0]       bmp_state_code;
 wire             scan_done;
 wire             scan_found_valid;
 wire [31:0]      scan_found_sector;
 wire [2:0]       scan_found_total;
+wire             load_failed;
 
 reg              scan_start_pulse;
 reg              load_start_pulse;
 reg [31:0]       load_sector;
+reg              scan_raw_only;
+reg              raw_fallback_started;
 reg              scan_kicked;
 reg              first_image_committed;
 reg              auto_play_en;
 reg [31:0]       auto_cnt;
 reg [2:0]        img_found_count;
-reg [1:0]        img_idx;              // 当前真正显示中的图片编号
-reg [1:0]        load_idx;             // 当前正在写入的图片编号
-reg [1:0]        pending_buf_idx;      // 当前正在写入的目标缓冲区
+reg [2:0]        img_loaded_count;
+reg [2:0]        next_load_idx;
+reg [1:0]        img_idx;
+reg [1:0]        load_idx;
+reg [1:0]        load_buf_idx;
 reg [31:0]       img_sector0;
 reg [31:0]       img_sector1;
 reg [31:0]       img_sector2;
 reg [31:0]       img_sector3;
-reg              next_req_pending;
 reg              load_busy;
-
-// bmp_ready 先表示“源文件读取/送 FIFO 完成”；真正切显示要等 write_finish_toggle 同步后
 reg              source_done_seen;
-reg              write_done_seen;     // 整帧写完的锁存标志(用锁存避免直接采 write_finish_pulse 被漏采)
-reg [31:0]       load_timeout_cnt;   // 加载超时计数器: 数到 100_000_000(@100MHz)=1秒 触发防死锁
-reg              load_abort;          // 超时/坏图时强制中止信号, 下传 bmp_read 让其回到 ST_IDLE
+reg              write_done_seen;
+reg [31:0]       load_stall_cnt;
+reg              load_abort;
 
-// 同步 mem_clk 域的 write_finish_toggle
 reg [2:0]        wrfin_tgl_sync;
 wire             write_finish_pulse;
 
 wire auto_tick;
-wire [1:0] next_from_current;
+wire [1:0] next_from_loaded;
+wire       source_done_now;
+wire       write_done_now;
+wire       load_complete_now;
+wire       load_progress;
+wire [2:0] loaded_count_plus_one;
 
 assign write_en   = bmp_data_wr_en;
 assign write_data = {bmp_data[23:16], bmp_data[15:8], bmp_data[7:0], 8'b0};
 assign auto_tick  = (auto_cnt == (CLK_FREQ_HZ - 1));
-assign next_from_current = next_index_limited(img_idx, img_found_count);
+assign next_from_loaded = next_index_limited(img_idx, img_loaded_count);
 assign write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
+assign source_done_now = source_done_seen | (load_busy && bmp_ready);
+assign write_done_now  = write_done_seen  | (load_busy && write_finish_pulse);
+assign load_complete_now = load_busy && source_done_now && write_done_now;
+assign load_progress = bmp_data_wr_en || write_finish_pulse || write_req_ack;
+assign loaded_count_plus_one = img_loaded_count + 3'd1;
+assign state_code = (!sd_init_done)                 ? 4'd0 :
+                    (display_valid && auto_play_en) ? 4'd6 :
+                    (display_valid)                 ? 4'd5 :
+                    (scan_raw_only && !scan_done)   ? 4'd7 :
+                                                       bmp_state_code;
 
 key_press_debounce #(
     .CLK_FREQ_HZ (CLK_FREQ_HZ),
@@ -144,49 +145,37 @@ function [31:0] sector_lut;
     end
 endfunction
 
-function [1:0] next_buf_lut;
-    input [1:0] cur_disp_buf;
-    input       valid_now;
-    begin
-        if (!valid_now)
-            next_buf_lut = 2'd0;                 // 首图固定写 buffer0
-        else if (cur_disp_buf == 2'd0)
-            next_buf_lut = 2'd1;
-        else
-            next_buf_lut = 2'd0;
-    end
-endfunction
-
 always @(posedge clk or posedge rst) begin
     if (rst) begin
         wrfin_tgl_sync        <= 3'b000;
         scan_start_pulse      <= 1'b0;
         load_start_pulse      <= 1'b0;
         load_sector           <= 32'd0;
+        scan_raw_only         <= 1'b0;
+        raw_fallback_started  <= 1'b0;
         scan_kicked           <= 1'b0;
         first_image_committed <= 1'b0;
         auto_play_en          <= 1'b0;
         auto_cnt              <= 32'd0;
         img_found_count       <= 3'd0;
+        img_loaded_count      <= 3'd0;
+        next_load_idx         <= 3'd0;
         img_idx               <= 2'd0;
         load_idx              <= 2'd0;
-        pending_buf_idx       <= 2'd0;
+        load_buf_idx          <= 2'd0;
         write_buf_idx         <= 2'd0;
         disp_buf_idx          <= 2'd0;
         img_sector0           <= 32'd0;
         img_sector1           <= 32'd0;
         img_sector2           <= 32'd0;
         img_sector3           <= 32'd0;
-        next_req_pending      <= 1'b0;
         load_busy             <= 1'b0;
         source_done_seen      <= 1'b0;
         write_done_seen       <= 1'b0;
-        load_timeout_cnt      <= 32'd0;
+        load_stall_cnt        <= 32'd0;
         load_abort            <= 1'b0;
         display_valid         <= 1'b0;
     end else begin
-        // 跨时钟域同步：write_finish_toggle 来自 ext_mem_clk 域(mem_clk 侧整帧写完拉一次)，
-        // 这里 3 级打拍后做边沿检测，避免亚稳态
         wrfin_tgl_sync   <= {wrfin_tgl_sync[1:0], write_finish_toggle};
         scan_start_pulse <= 1'b0;
         load_start_pulse <= 1'b0;
@@ -198,24 +187,26 @@ always @(posedge clk or posedge rst) begin
             auto_play_en          <= 1'b0;
             auto_cnt              <= 32'd0;
             img_found_count       <= 3'd0;
+            img_loaded_count      <= 3'd0;
+            next_load_idx         <= 3'd0;
             img_idx               <= 2'd0;
             load_idx              <= 2'd0;
-            pending_buf_idx       <= 2'd0;
+            load_buf_idx          <= 2'd0;
             write_buf_idx         <= 2'd0;
             disp_buf_idx          <= 2'd0;
             img_sector0           <= 32'd0;
             img_sector1           <= 32'd0;
             img_sector2           <= 32'd0;
             img_sector3           <= 32'd0;
-            next_req_pending      <= 1'b0;
             load_busy             <= 1'b0;
             source_done_seen      <= 1'b0;
             write_done_seen       <= 1'b0;
-            load_timeout_cnt      <= 32'd0;
+            load_stall_cnt        <= 32'd0;
             load_abort            <= 1'b0;
             display_valid         <= 1'b0;
+            scan_raw_only         <= 1'b0;
+            raw_fallback_started  <= 1'b0;
         end else begin
-            // 扫描阶段缓存前 4 张图的起始 sector
             if (scan_found_valid) begin
                 case (img_found_count)
                     3'd0: img_sector0 <= scan_found_sector;
@@ -229,44 +220,48 @@ always @(posedge clk or posedge rst) begin
                     img_found_count <= img_found_count + 3'd1;
             end
 
-            // 记住 bmp_read 已经把源图送完 FIFO，但还不能切显示，得等整帧写完
             if (load_busy && bmp_ready)
                 source_done_seen <= 1'b1;
 
-            // 记住写帧完成脉冲(锁存)，避免“先写完后源结束”导致脉冲被漏采而卡死
             if (load_busy && write_finish_pulse)
                 write_done_seen <= 1'b1;
 
-            // 只有“源图送完 + 整帧写完”都满足，才提交新图并切换显示缓冲区
-            // 用锁存标志(source_done_seen && write_done_seen)比直接采脉冲更稳健，不会因
-            // 跨时钟域漏采一个脉冲而永远不切显示(黑屏)
-            if (load_busy && source_done_seen && write_done_seen) begin
-                load_busy             <= 1'b0;
-                load_timeout_cnt      <= 32'd0;
-                source_done_seen      <= 1'b0;
-                write_done_seen       <= 1'b0;
-                disp_buf_idx          <= pending_buf_idx;
-                img_idx               <= load_idx;
-                display_valid         <= 1'b1;
-                first_image_committed <= 1'b1;
+            if (load_busy && load_failed) begin
+                load_busy        <= 1'b0;
+                source_done_seen <= 1'b0;
+                write_done_seen  <= 1'b0;
+                load_stall_cnt   <= 32'd0;
+            end else if (load_complete_now) begin
+                load_busy        <= 1'b0;
+                source_done_seen <= 1'b0;
+                write_done_seen  <= 1'b0;
+                load_stall_cnt   <= 32'd0;
+
+                if (img_loaded_count < SCAN_TARGET_COUNT)
+                    img_loaded_count <= loaded_count_plus_one;
+
+                if (!first_image_committed && (load_buf_idx == 2'd0)) begin
+                    disp_buf_idx          <= load_buf_idx;
+                    img_idx               <= load_buf_idx;
+                    display_valid         <= 1'b1;
+                    first_image_committed <= 1'b1;
+                end
             end else if (load_busy) begin
-                // 加载超时防死锁(代码说明要求的 1 秒机制):
-                // 若读到坏图/截断文件/卡无响应导致始终凑不齐“源完+帧完”，
-                // 数到 100_000_000(@100MHz=1秒)后强制释放 busy 并 load_abort，恢复系统运行
-                if (load_timeout_cnt > 32'd100_000_000) begin
-                    load_busy             <= 1'b0;
-                    load_timeout_cnt      <= 32'd0;
-                    source_done_seen      <= 1'b0;
-                    write_done_seen       <= 1'b0;
-                    load_abort            <= 1'b1;
+                if (load_progress) begin
+                    load_stall_cnt <= 32'd0;
+                end else if (load_stall_cnt >= CLK_FREQ_HZ - 1) begin
+                    load_busy        <= 1'b0;
+                    source_done_seen <= 1'b0;
+                    write_done_seen  <= 1'b0;
+                    load_stall_cnt   <= 32'd0;
+                    load_abort       <= 1'b1;
                 end else begin
-                    load_timeout_cnt <= load_timeout_cnt + 32'd1;
+                    load_stall_cnt <= load_stall_cnt + 32'd1;
                 end
             end else begin
-                load_timeout_cnt <= 32'd0;
+                load_stall_cnt <= 32'd0;
             end
 
-            // 上电后自动发起一次“扫描前 4 张 BMP”
             if (!scan_kicked && bmp_ready) begin
                 scan_start_pulse      <= 1'b1;
                 scan_kicked           <= 1'b1;
@@ -274,70 +269,74 @@ always @(posedge clk or posedge rst) begin
                 auto_play_en          <= 1'b0;
                 auto_cnt              <= 32'd0;
                 img_found_count       <= 3'd0;
+                img_loaded_count      <= 3'd0;
+                next_load_idx         <= 3'd0;
                 img_idx               <= 2'd0;
                 load_idx              <= 2'd0;
-                pending_buf_idx       <= 2'd0;
+                load_buf_idx          <= 2'd0;
                 write_buf_idx         <= 2'd0;
                 disp_buf_idx          <= 2'd0;
-                next_req_pending      <= 1'b0;
                 display_valid         <= 1'b0;
                 load_busy             <= 1'b0;
                 source_done_seen      <= 1'b0;
+                write_done_seen       <= 1'b0;
+                load_stall_cnt        <= 32'd0;
+                load_abort            <= 1'b0;
+                scan_raw_only         <= 1'b0;
+                raw_fallback_started  <= 1'b0;
             end else begin
-                // 忙的时候也只记 1 次“下一张”请求，不会累积成连跳两张
-                if (key_next_press && scan_done && (img_found_count > 3'd0))
-                    next_req_pending <= 1'b1;
-
-                // 自动播放开/关
-                if (key_auto_press && scan_done && (img_found_count > 3'd1)) begin
+                if (key_auto_press && first_image_committed && (img_found_count > 3'd1)) begin
                     auto_play_en <= ~auto_play_en;
                     auto_cnt     <= 32'd0;
                 end
 
-                // 自动播放 1s 计数：只有当前没有写图任务时才计时
-                if (scan_done && auto_play_en && display_valid && !load_busy && first_image_committed && (img_found_count > 3'd1)) begin
-                    if (auto_tick)
-                        auto_cnt <= 32'd0;
-                    else
+                if (auto_play_en && first_image_committed && (img_loaded_count > 3'd1)) begin
+                    if (auto_tick) begin
+                        auto_cnt     <= 32'd0;
+                        img_idx      <= next_from_loaded;
+                        disp_buf_idx <= next_from_loaded;
+                    end else begin
                         auto_cnt <= auto_cnt + 32'd1;
+                    end
                 end else begin
                     auto_cnt <= 32'd0;
                 end
 
-                // 首图自动加载到 buffer0
-                // 首图：扫描完成后自动加载第 0 张(img_sector0)到 buffer0
-                if (scan_done && !first_image_committed && bmp_ready && !load_busy && (img_found_count != 3'd0)) begin
-                    load_idx         <= 2'd0;
-                    load_sector      <= img_sector0;
-                    pending_buf_idx  <= 2'd0;   // 首图固定写 buffer0
-                    write_buf_idx    <= 2'd0;
-                    load_start_pulse <= 1'b1;
-                    load_busy        <= 1'b1;
-                    source_done_seen <= 1'b0;
-                    next_req_pending <= 1'b0;
-                    auto_cnt         <= 32'd0;
+                if (key_next_press && first_image_committed && (img_loaded_count > 3'd1)) begin
+                    img_idx      <= next_from_loaded;
+                    disp_buf_idx <= next_from_loaded;
+                    auto_cnt     <= 32'd0;
                 end
-                // 手动下一张优先：写到“非当前显示”的另一块 buffer
-                else if (scan_done && bmp_ready && display_valid && !load_busy && next_req_pending && (img_found_count != 3'd0)) begin
-                    load_idx         <= next_from_current;
-                    load_sector      <= sector_lut(next_from_current);
-                    pending_buf_idx  <= next_buf_lut(disp_buf_idx, display_valid);
-                    write_buf_idx    <= next_buf_lut(disp_buf_idx, display_valid);
+
+                if (scan_done && bmp_ready && !load_busy &&
+                    !scan_raw_only && !raw_fallback_started && !first_image_committed &&
+                    (next_load_idx >= img_found_count)) begin
+                    scan_start_pulse     <= 1'b1;
+                    scan_raw_only        <= 1'b1;
+                    raw_fallback_started <= 1'b1;
+                    img_found_count      <= 3'd0;
+                    img_loaded_count     <= 3'd0;
+                    next_load_idx        <= 3'd0;
+                    img_sector0          <= 32'd0;
+                    img_sector1          <= 32'd0;
+                    img_sector2          <= 32'd0;
+                    img_sector3          <= 32'd0;
+                    source_done_seen     <= 1'b0;
+                    write_done_seen      <= 1'b0;
+                    load_stall_cnt       <= 32'd0;
+                end else if (scan_done && bmp_ready && !load_busy &&
+                             (next_load_idx < img_found_count) &&
+                             (img_loaded_count < SCAN_TARGET_COUNT)) begin
+                    load_idx         <= next_load_idx[1:0];
+                    load_buf_idx     <= img_loaded_count[1:0];
+                    load_sector      <= sector_lut(next_load_idx[1:0]);
+                    write_buf_idx    <= img_loaded_count[1:0];
+                    next_load_idx    <= next_load_idx + 3'd1;
                     load_start_pulse <= 1'b1;
                     load_busy        <= 1'b1;
                     source_done_seen <= 1'b0;
-                    next_req_pending <= 1'b0;
-                    auto_cnt         <= 32'd0;
-                end
-                // 自动播放下一张：同样写到“非当前显示”的另一块 buffer
-                else if (scan_done && bmp_ready && display_valid && !load_busy && auto_play_en && auto_tick && (img_found_count > 3'd1)) begin
-                    load_idx         <= next_from_current;
-                    load_sector      <= sector_lut(next_from_current);
-                    pending_buf_idx  <= next_buf_lut(disp_buf_idx, display_valid);
-                    write_buf_idx    <= next_buf_lut(disp_buf_idx, display_valid);
-                    load_start_pulse <= 1'b1;
-                    load_busy        <= 1'b1;
-                    source_done_seen <= 1'b0;
+                    write_done_seen  <= 1'b0;
+                    load_stall_cnt   <= 32'd0;
                     auto_cnt         <= 32'd0;
                 end
             end
@@ -351,6 +350,7 @@ bmp_read bmp_read_m0(
     .ready                  (bmp_ready),
 
     .scan_start             (scan_start_pulse),
+    .scan_raw_only          (scan_raw_only),
     .scan_start_sector      (SCAN_START_SECTOR),
     .scan_max_sector        (SCAN_MAX_SECTOR),
     .scan_target_count      (SCAN_TARGET_COUNT),
@@ -362,9 +362,10 @@ bmp_read bmp_read_m0(
     .load_start             (load_start_pulse),
     .load_abort             (load_abort),
     .load_sector            (load_sector),
+    .load_failed            (load_failed),
 
     .sd_init_done           (sd_init_done),
-    .state_code             (state_code),
+    .state_code             (bmp_state_code),
     .bmp_width              (bmp_width),
     .bmp_height             (bmp_height),
     .write_req              (write_req),
@@ -406,7 +407,7 @@ module key_press_debounce #(
 )(
     input  wire clk,
     input  wire rst,
-    input  wire button_in,    // 默认：松开=1，按下=0
+    input  wire button_in,
     output reg  press_pulse
 );
 

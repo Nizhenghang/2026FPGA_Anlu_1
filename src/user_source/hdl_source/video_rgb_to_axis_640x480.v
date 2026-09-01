@@ -1,15 +1,4 @@
 
-// ============================================================================
-// 文件：video_rgb_to_axis_640x480.v
-// 功能：把并行 RGB + 时序(hs/vs/de) 打包成 AXI4-Stream 视频格式(供 HDMI 发射核)
-// 接口：输入 I_rgb(24bit) + I_de/I_vs；输出 O_video_user(SOF 帧首) / O_video_valid(=de)
-//       / O_video_last(帧末) / O_video_data(24bit RGB)
-// 关键逻辑：
-//   - O_video_valid 直接等于 I_de(有效像素期间为高)
-//   - SOF(user)：检测到一次 VS 边沿后，把"下一行首像素"标记成帧首(S_frame_arm 机制)
-//   - last：每行第 640 个像素(S_x_cnt==639)拉高，标记一帧最后一个有效像素
-//   协议细节见安路 HDMI 发射核 AXI-Stream 视频接口要求
-// ============================================================================
 module video_rgb_to_axis_640x480(
     input  wire        I_clk,
     input  wire        I_rst,
