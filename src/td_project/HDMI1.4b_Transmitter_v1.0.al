@@ -216,6 +216,38 @@
                     <Attr Name="CompileOrder" Val="33"/>
                 </FileInfo>
             </File>
+            <File Path="../user_source/hdl_source/osd_overlay.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="44"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/video_brightness.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="45"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/video_fade.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="46"/>
+                </FileInfo>
+            </File>
+            <File Path="../user_source/hdl_source/audio_visualizer.v">
+                <FileInfo>
+                    <Attr Name="UsedInSyn" Val="true"/>
+                    <Attr Name="UsedInP&R" Val="true"/>
+                    <Attr Name="BelongTo" Val="design_1"/>
+                    <Attr Name="CompileOrder" Val="47"/>
+                </FileInfo>
+            </File>
             <File Path="../user_source/hdl_source/SD/sd_card_cmd.v">
                 <FileInfo>
                     <Attr Name="UsedInSyn" Val="true"/>

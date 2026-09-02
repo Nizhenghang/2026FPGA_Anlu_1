@@ -4,6 +4,7 @@ module top(
     input                       rst_n,
     input                       key1,           // 手动下一张
     input                       key2,           // 自动播放 开/关
+    input                       key3,           // 亮度档位循环
 
     output [5:0]                seg_sel,
     output [7:0]                seg_data,
@@ -49,8 +50,16 @@ wire vs;
 wire de;
 
 wire [23:0] vout_data_raw;
+wire [23:0] vout_data_base;
+wire [23:0] vout_data_bright;
+wire [23:0] vout_data_fade;
+wire [23:0] vout_data_audio;
 wire [23:0] vout_data;
 wire        display_valid;
+wire        auto_play_enabled;
+wire        key3_bright_press;
+wire        fade_start;
+wire        video_frame_start;
 
 wire [3:0]  state_code;
 wire [6:0]  seg_data_0;
@@ -69,6 +78,20 @@ reg         frame_write_toggle_mem;
 
 wire [1:0]  write_buf_idx;
 wire [1:0]  disp_buf_idx;
+reg  [1:0]  disp_buf_idx_v0;
+reg  [1:0]  disp_buf_idx_v1;
+reg  [3:0]  state_code_v0;
+reg  [3:0]  state_code_v1;
+reg         auto_play_v0;
+reg         auto_play_v1;
+reg         display_valid_v0;
+reg         display_valid_v1;
+reg         display_valid_prev;
+reg  [2:0]  brightness_level;
+reg  [2:0]  brightness_level_v0;
+reg  [2:0]  brightness_level_v1;
+reg  [1:0]  disp_buf_idx_prev;
+reg         vs_d;
 
 wire App_rd_en;
 wire [ADDR_BITS-1:0] App_rd_addr;
@@ -111,6 +134,10 @@ wire [9:0]  tmds_ch1_data;
 wire [9:0]  tmds_ch2_data;
 wire [9:0]  tmds_clk_data;
 
+assign fade_start = display_valid_v1 &&
+                    ((!display_valid_prev) || (disp_buf_idx_v1 != disp_buf_idx_prev));
+assign video_frame_start = vs_d & ~vs;
+
 // 统一复位：TF 图像链路 + HDMI 音频链路
 wire rst_all;
 assign rst_all = ~rst_n | ~audio_pll_lock;
@@ -149,6 +176,56 @@ always @(posedge ext_mem_clk or posedge rst_all) begin
         frame_write_toggle_mem <= ~frame_write_toggle_mem;
 end
 
+key_press_debounce #(
+    .CLK_FREQ_HZ (50_000_000),
+    .DEBOUNCE_MS (20)
+) u_key_brightness (
+    .clk        (clk),
+    .rst        (rst_all),
+    .button_in  (key3),
+    .press_pulse(key3_bright_press)
+);
+
+always @(posedge clk or posedge rst_all) begin
+    if (rst_all)
+        brightness_level <= 3'd2;
+    else if (key3_bright_press)
+        brightness_level <= (brightness_level == 3'd4) ? 3'd0 : (brightness_level + 3'd1);
+end
+
+// 将 SD 控制域的慢速状态同步到 video_clk 域，供 OSD 和黑屏门控使用
+always @(posedge video_clk or posedge rst_all) begin
+    if (rst_all) begin
+        disp_buf_idx_v0  <= 2'd0;
+        disp_buf_idx_v1  <= 2'd0;
+        state_code_v0    <= 4'd0;
+        state_code_v1    <= 4'd0;
+        auto_play_v0     <= 1'b0;
+        auto_play_v1     <= 1'b0;
+        display_valid_v0 <= 1'b0;
+        display_valid_v1 <= 1'b0;
+        display_valid_prev <= 1'b0;
+        brightness_level_v0 <= 3'd2;
+        brightness_level_v1 <= 3'd2;
+        disp_buf_idx_prev <= 2'd0;
+        vs_d <= 1'b0;
+    end else begin
+        disp_buf_idx_v0  <= disp_buf_idx;
+        disp_buf_idx_v1  <= disp_buf_idx_v0;
+        state_code_v0    <= state_code;
+        state_code_v1    <= state_code_v0;
+        auto_play_v0     <= auto_play_enabled;
+        auto_play_v1     <= auto_play_v0;
+        display_valid_v0 <= display_valid;
+        display_valid_v1 <= display_valid_v0;
+        display_valid_prev <= display_valid_v1;
+        brightness_level_v0 <= brightness_level;
+        brightness_level_v1 <= brightness_level_v0;
+        disp_buf_idx_prev <= disp_buf_idx_v1;
+        vs_d <= vs;
+    end
+end
+
 // ===================== TF 多图扫描与缓存（双缓冲） =====================
 sd_card_bmp #(
     .CLK_FREQ_HZ       (100_000_000),
@@ -164,6 +241,7 @@ sd_card_bmp #(
     .bmp_width         (16'd640),
     .bmp_height        (16'd480),
     .display_valid     (display_valid),
+    .auto_play_enabled (auto_play_enabled),
 
     .write_finish_toggle(frame_write_toggle_mem),
     .write_buf_idx     (write_buf_idx),
@@ -223,7 +301,54 @@ video_delay video_delay_m0(
 );
 
 // 首图提交前黑屏；提交后一直显示当前显示缓冲区内容
-assign vout_data = display_valid ? vout_data_raw : 24'd0;
+assign vout_data_base = display_valid_v1 ? vout_data_raw : 24'd0;
+
+video_brightness u_video_brightness (
+    .I_rgb   (vout_data_base),
+    .I_level (display_valid_v1 ? brightness_level_v1 : 3'd2),
+    .O_rgb   (vout_data_bright)
+);
+
+video_fade u_video_fade (
+    .I_clk           (video_clk),
+    .I_rst           (rst_all),
+    .I_frame_start   (video_frame_start),
+    .I_start         (fade_start),
+    .I_display_valid (display_valid_v1),
+    .I_rgb           (vout_data_bright),
+    .O_rgb           (vout_data_fade)
+);
+
+audio_visualizer #(
+    .H_ACTIVE (640),
+    .V_ACTIVE (480)
+) u_audio_visualizer (
+    .I_clk         (video_clk),
+    .I_rst         (rst_all),
+    .I_de          (de),
+    .I_frame_start (video_frame_start),
+    .I_rgb         (vout_data_fade),
+    .I_audio_valid (audio_valid),
+    .I_audio_left  (audio_left_data),
+    .I_audio_right (audio_right_data),
+    .O_rgb         (vout_data_audio)
+);
+
+osd_overlay #(
+    .H_ACTIVE (640),
+    .V_ACTIVE (480)
+) u_osd_overlay (
+    .I_clk           (video_clk),
+    .I_rst           (rst_all),
+    .I_de            (de),
+    .I_rgb           (vout_data_audio),
+    .I_display_valid (display_valid_v1),
+    .I_image_index   (disp_buf_idx_v1),
+    .I_auto_play     (auto_play_v1),
+    .I_brightness    (brightness_level_v1),
+    .I_state_code    (state_code_v1),
+    .O_rgb           (vout_data)
+);
 
 frame_read_write #(
     .WRITE_V_FLIP     (1),

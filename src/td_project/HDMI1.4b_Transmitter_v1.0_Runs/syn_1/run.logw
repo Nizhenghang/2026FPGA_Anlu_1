@@ -4,7 +4,7 @@
    Executable = D:/Download/TD/bin/run.exe
    Built at =   14:07:58 Sep  4 2025
    Run by =     Nizhenghang
-   Run Date =   Tue Sep  1 11:11:27 2026
+   Run Date =   Tue Sep  1 19:11:29 2026
 
    Run on =     LAPTOP-9S21NQG2
 ============================================================
@@ -16,21 +16,21 @@ All rights reserved.
 This product includes cryptographic software written by Eric Young (eay@cryptsoft.com)
 HDL-5007 WARNING: concatenation with an unsized literal will be treated as 32 bits in ../../../user_source/hdl_source/include/sdr_init_ref.enc.v(47)
 HDL-5007 WARNING: concatenation with an unsized literal will be treated as 32 bits in ../../../user_source/hdl_source/include/sdr_wrrd.enc.v(283)
-HDL-5323 WARNING: input port 'sd_sec_write_data[7]' remains unconnected for this instance in ../../../user_source/hdl_source/SD/sd_card_bmp.v(382)
+HDL-5323 WARNING: input port 'sd_sec_write_data[7]' remains unconnected for this instance in ../../../user_source/hdl_source/SD/sd_card_bmp.v(384)
 HDL-5317 WARNING: input port 'dib[31]' is not connected on this instance in ../../../user_source/hdl_source/ip/afifo_16_32_256.v(231)
 HDL-5007 WARNING: actual bit length 9 differs from formal bit length 10 for port 'rdusedw' in ../../../user_source/hdl_source/SD/frame_read_write.v(140)
 HDL-5317 WARNING: input port 'dib[31]' is not connected on this instance in ../../../user_source/hdl_source/ip/afifo_32_16_256.v(231)
 HDL-5007 WARNING: actual bit length 9 differs from formal bit length 10 for port 'wrusedw' in ../../../user_source/hdl_source/SD/frame_read_write.v(190)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_addr_0' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(248)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_addr_1' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(249)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_addr_2' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(250)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_addr_3' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(251)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_len' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(253)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_addr_0' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(266)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_addr_1' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(267)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_addr_2' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(268)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_addr_3' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(269)
-HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_len' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(271)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_addr_0' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(357)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_addr_1' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(358)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_addr_2' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(359)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_addr_3' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(360)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'read_len' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(362)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_addr_0' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(375)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_addr_1' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(376)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_addr_2' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(377)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_addr_3' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(378)
+HDL-5007 WARNING: actual bit length 24 differs from formal bit length 21 for port 'write_len' in ../../../user_source/hdl_source/top_tf_hdmi_audio.v(380)
 HDL-5007 WARNING: concatenation with an unsized literal will be treated as 32 bits in ../../../user_source/hdl_source/include/sdr_init_ref.enc.v(47)
 HDL-5007 WARNING: concatenation with an unsized literal will be treated as 32 bits in ../../../user_source/hdl_source/include/sdr_wrrd.enc.v(283)
 HDL-5317 WARNING: input port '**' is not connected on this instance in ../../../user_source/hdl_source/include/sdr_as_ram.enc.v(17)

@@ -20,6 +20,7 @@ set_pin_assignment	{ HDMI_D2_P }	{ LOCATION = E1; IOSTANDARD = LVDS33; PULLTYPE 
 set_pin_assignment	{ clk }	{ LOCATION = R7; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
 set_pin_assignment	{ key1 }	{ LOCATION = B2; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
 set_pin_assignment	{ key2 }	{ LOCATION = C1; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
+set_pin_assignment	{ key3 }	{ LOCATION = B1; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
 set_pin_assignment	{ rst_n }	{ LOCATION = A2; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }
 set_pin_assignment	{ sd_dclk }	{ LOCATION = A14; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
 set_pin_assignment	{ sd_miso }	{ LOCATION = B14; IOSTANDARD = LVCMOS33; PULLTYPE = NONE; }

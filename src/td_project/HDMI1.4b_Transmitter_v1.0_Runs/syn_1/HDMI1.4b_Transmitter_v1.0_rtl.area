@@ -2,36 +2,36 @@ standard
 ***Report Model: top Device: EG4S20BG256***
 
 IO Statistics
-#IO                        28
-  #input                    5
+#IO                        29
+  #input                    6
   #output                  22
   #inout                    1
 
 Gate Statistics
-#Basic gates             7454
-  #and                   1338
+#Basic gates             7780
+  #and                   1379
   #nand                     0
-  #or                     959
+  #or                     964
   #nor                      0
-  #xor                    106
+  #xor                    107
   #xnor                     0
   #buf                      0
-  #not                    370
+  #not                    423
   #bufif1                  33
-  #MX21                   592
+  #MX21                   743
   #FADD                     0
-  #DFF                   4056
+  #DFF                   4131
   #LATCH                    0
-#MACRO_ADD                263
-#MACRO_EQ                 153
-#MACRO_MUX               1869
+#MACRO_ADD                311
+#MACRO_EQ                 161
+#MACRO_MUX               2417
 #MACRO_OTHERS              12
 
 Report Hierarchy Area:
 +---------------------------------------------------------------------------------------------------------------------+
 |Instance                                  |Module                                            |gates  |seq    |macros |
 +---------------------------------------------------------------------------------------------------------------------+
-|top                                       |top                                               |3398   |4056   |428    |
+|top                                       |top                                               |3649   |4131   |484    |
 |  U3                                      |sdram                                             |86     |515    |6      |
 |    u2_ram                                |sdr_as_ram                                        |86     |515    |6      |
 |      u1_init_ref                         |sdr_init_ref                                      |19     |81     |1      |
@@ -48,14 +48,14 @@ Report Hierarchy Area:
 |      rd_to_wr_cross_inst                 |fifo_cross_domain_addr_process_al_wfifo_32_32_512 |16     |36     |0      |
 |      wr_to_rd_cross_inst                 |fifo_cross_domain_addr_process_al_wfifo_32_32_512 |16     |36     |0      |
 |  sd_card_bmp_m0                          |sd_card_bmp                                       |2539   |1237   |99     |
-|    bmp_read_m0                           |bmp_read                                          |1848   |761    |65     |
-|    sd_card_top_m0                        |sd_card_top                                       |407    |181    |13     |
-|      sd_card_cmd_m0                      |sd_card_cmd                                       |275    |48     |8      |
+|    bmp_read_m0                           |bmp_read                                          |1847   |761    |65     |
+|    sd_card_top_m0                        |sd_card_top                                       |408    |181    |13     |
+|      sd_card_cmd_m0                      |sd_card_cmd                                       |276    |48     |8      |
 |      sd_card_sec_read_write_m0           |sd_card_sec_read_write                            |121    |89     |0      |
 |      spi_master_m0                       |spi_master                                        |11     |44     |5      |
 |    u_key_auto                            |key_press_debounce                                |28     |25     |2      |
 |    u_key_next                            |key_press_debounce                                |28     |25     |2      |
-|  seg_decoder_m0                          |seg_decoder                                       |4      |0      |0      |
+|  seg_decoder_m0                          |seg_decoder                                       |2      |0      |0      |
 |  seg_scan_m0                             |seg_scan                                          |10     |33     |9      |
 |  sys_pll_m0                              |sys_pll                                           |0      |0      |1      |
 |  u_I2S_receiver                          |I2S_receiver                                      |8      |213    |0      |
@@ -91,9 +91,13 @@ Report Hierarchy Area:
 |      u_hdmi_video_source                 |hdmi_video_source                                 |20     |38     |24     |
 |      u_video_axi_stream_receiver         |video_axi_stream_receiver                         |8      |2      |1      |
 |        u_w24_d1024_fifo                  |w24_d1024_fifo                                    |0      |0      |1      |
-|  u_hdmi_audio_tone_i2s_64fs              |hdmi_audio_tone_i2s_64fs                          |16     |82     |6      |
+|  u_hdmi_audio_tone_i2s_64fs              |hdmi_audio_tone_i2s_64fs                          |14     |82     |6      |
+|  u_key_brightness                        |key_press_debounce                                |27     |24     |2      |
+|  u_osd_overlay                           |osd_overlay                                       |152    |21     |23     |
 |  u_startup_pulse                         |startup_pulse                                     |3      |22     |2      |
-|  u_video_rgb_to_axis_640x480             |video_rgb_to_axis_640x480                         |5      |28     |0      |
+|  u_video_brightness                      |video_brightness                                  |33     |0      |15     |
+|  u_video_fade                            |video_fade                                        |34     |5      |13     |
+|  u_video_rgb_to_axis_640x480             |video_rgb_to_axis_640x480                         |5      |27     |0      |
 |  video_delay_m0                          |video_delay                                       |0      |66     |0      |
 |  video_pll_m0                            |video_pll                                         |0      |0      |1      |
 |  video_timing_data_m0                    |video_timing_data                                 |10     |33     |9      |

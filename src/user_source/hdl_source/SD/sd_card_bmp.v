@@ -12,6 +12,7 @@ module sd_card_bmp #(
     input  [15:0]               bmp_width,
     input  [15:0]               bmp_height,
     output reg                  display_valid,
+    output                      auto_play_enabled,
 
     input                       write_finish_toggle,
     output reg [1:0]            write_buf_idx,
@@ -92,6 +93,7 @@ assign write_done_now  = write_done_seen  | (load_busy && write_finish_pulse);
 assign load_complete_now = load_busy && source_done_now && write_done_now;
 assign load_progress = bmp_data_wr_en || write_finish_pulse || write_req_ack;
 assign loaded_count_plus_one = img_loaded_count + 3'd1;
+assign auto_play_enabled = auto_play_en;
 assign state_code = (!sd_init_done)                 ? 4'd0 :
                     (display_valid && auto_play_en) ? 4'd6 :
                     (display_valid)                 ? 4'd5 :
