@@ -1,0 +1,19 @@
+# Tang Dynasty run directories. Everything under here is regenerated from
+# HDMI1.4b_Transmitter_v1.0.al by tools/td_build.ps1; only best_result/ is kept,
+# because that is the bitstream that actually goes on the board.
+src/td_project/HDMI1.4b_Transmitter_v1.0_Runs/syn_1/
+src/td_project/HDMI1.4b_Transmitter_v1.0_Runs/phy_1/
+src/td_project/log/
+
+# Local build and diagnostic scratch, not project content.
+_baseline_backup/
+_build_logs/
+
+# Python.
+__pycache__/
+*.pyc
+
+# Tool output. The scripts that produce these are tracked; their logs and
+# rendered previews are not.
+tools/*.log
+tools/card_preview/
