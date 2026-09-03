@@ -1,0 +1,48 @@
+BMP acceptance set: setA_fill
+
+Copy the .bmp files of THIS DIRECTORY ONLY to the root of a
+freshly FAT32 formatted TF card, in one operation. Do not add
+or delete files afterwards: ST_LOAD_DATA walks sectors with
+sd_sec_read_addr + 1 and never follows the FAT chain, so a
+fragmented file reads as garbage.
+
+bmp_read.v scans the root directory in entry order and stops
+at SCAN_TARGET_COUNT = 4, so exactly these four files must be
+the only BMPs on the card.
+
+Compare the panel against ../expected_screen/<name>_expected.png,
+NOT against the source BMPs. Those previews are 640x480 and are
+computed with scaler_nn.v's own mapping formula, so they show
+what the screen should actually look like after the stretch and
+the centring. A strong downscale is meant to look squashed.
+
+file           src     stride    expected tw/th expected off on screen
+----------------------------------------------------------------------
+640x480.bmp    640x480 1920      640x480       0,0         fills the panel, no border
+800x600.bmp    800x600 2400      640x480       0,0         fills the panel, no border
+1920x1080.bmp  1920x1080 5760      640x480       0,0         fills the panel, no border
+320x240.bmp    320x240 960       640x480       0,0         fills the panel, no border
+
+(*) a padded row is what exercises the row_byte_cnt < src_w3
+    gate in bmp_read.v: a 24-bit row is padded up to a
+    multiple of four bytes and those pad bytes must not be
+    taken for pixels. Every multiple-of-four width skips that
+    path entirely, which is how the 640x480 only test set got
+    away without it.
+
+Pattern key, same for every file in this set:
+    corner blocks   top-left RED, top-right GREEN,
+                    bottom-left BLUE, bottom-right WHITE
+    1 px black edge on all four sides of the source
+    centred white box, 80% x 60% of the source
+    white label with the source resolution, centred
+
+How to read the result:
+    red and blue swapped      image is flipped vertically
+    red and green swapped     image is flipped horizontally
+    red corner looks blue     BGR/RGB order wrong in unpacking
+    box margins unequal       mapping is shifted, off-by-one
+    black edge missing        outermost source pixel is clipped
+    label unreadable but      expected on a strong downscale;
+      colours and box ok        nearest neighbour aliases fine
+                              detail away by design
