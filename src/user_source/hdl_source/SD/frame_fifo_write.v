@@ -71,6 +71,7 @@ reg[1:0]                            write_addr_index_d1;
 reg[3:0]                            state;                       //state machine
 reg [ADDR_BITS - 1:0]	 App_wr_addr_r;
 reg [15:0]                            wr_x;                       // current x position in one input row
+reg [ADDR_BITS - 1:0]                 write_remain;               // registered write_len_latch - write_cnt
 
 reg [BURST_BITS - 1:0]				burst_cnt;
 wire								wr_burst_finish;
@@ -79,7 +80,19 @@ reg App_wr_en_r;
 reg App_wr_en_d0;
 
 wire into_burst;
-assign into_burst = (((write_len_latch <= (rdusedw + write_cnt))||rdusedw > BURST_SIZE) && ~App_rd_busy);//当rd在突发时不会进入burst
+// Frame-tail test. write_len_latch and write_cnt are both quasi-static while the
+// FSM waits in S_CHECK_FIFO, so their difference is pre-computed in write_remain
+// instead of rebuilding a 21-bit adder feeding a 21-bit comparator every cycle.
+// That combinational chain ran from the write FIFO rdusedw output all the way to
+// frame_fifo_read's App_rd_en_r arbitration input and was the critical path of
+// the ext_mem_clk domain. into_burst itself stays purely combinational, so the
+// same-cycle write-over-read priority below is unchanged.
+// rdusedw is BURST_BITS+1 bits wide, therefore write_remain <= rdusedw can only
+// hold when the upper bits of write_remain are all zero; that test is a plain
+// OR-reduce and needs no carry chain.
+wire remain_within_usedw = ~(|write_remain[ADDR_BITS - 1:BURST_BITS + 1]);
+wire tail_flush_ready    = remain_within_usedw && (write_remain[BURST_BITS:0] <= rdusedw);
+assign into_burst = ((tail_flush_ready || rdusedw > BURST_SIZE) && ~App_rd_busy);//当rd在突发时不会进入burst
 
 assign App_wr_addr = {App_wr_addr_r[ADDR_BITS - 1:0]};
 //assign O_wr_busy = (state != S_IDLE || (S_IDLE && write_req_d2));
@@ -185,6 +198,7 @@ begin
 		write_cnt <= ZERO[ADDR_BITS - 1:0];
 		fifo_aclr <= 1'b0;
 		write_req_ack <= 1'b0;
+		write_remain <= ZERO[ADDR_BITS - 1:0];
 		//wr_burst_len <= ZERO[BURST_BITS - 1:0];
 		
 		
@@ -232,6 +246,9 @@ begin
 				end
 				//write data counter reset, write_cnt <= 0;
 				write_cnt <= ZERO[ADDR_BITS - 1:0];
+				//write_len_latch is only reloaded while the request is still held high,
+				//so write_remain must be seeded from exactly the same source
+				write_remain <= (write_req_d2 == 1'b1) ? write_len_d1 : write_len_latch;
 			end
 			S_CHECK_FIFO:
 			begin
@@ -259,6 +276,8 @@ begin
 					state <= S_WRITE_BURST_END;
 					//write counter + burst length
 					write_cnt <= write_cnt + BURST_SIZE[ADDR_BITS - 1:0];
+					//saturate instead of wrapping so the tail test can never go false-negative
+					write_remain <= (write_remain >= BURST_SIZE[ADDR_BITS - 1:0]) ? (write_remain - BURST_SIZE[ADDR_BITS - 1:0]) : ZERO[ADDR_BITS - 1:0];
 					//the next burst write address is generated
 					//wr_burst_addr <= wr_burst_addr + BURST_SIZE[ADDR_BITS - 1:0];
 				end     

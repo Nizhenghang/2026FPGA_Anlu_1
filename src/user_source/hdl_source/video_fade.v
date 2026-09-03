@@ -1,43 +1,34 @@
+// ---------------------------------------------------------------------------
+// video_fade -- stage 4, pure combinational brightness scaling stage.
+//
+// The level counter that used to live here moved to video_transition.v. This
+// module used to be given a one shot start pulse and count the ramp itself,
+// which cannot work any more: the sequence is now fade out, hand the buffer
+// over while the screen is black, fade in, and that has to be timed against
+// the frame boundary, which is only visible from the video_clk domain controller.
+// scale_channel and the output mux are unchanged from the version that was
+// verified on hardware, so the visible ramp is bit for bit the same; the only
+// difference is that the level arrives on a port instead of being generated.
+//
+// Level 0 is black, FADE_MAX in video_transition (8) is unity gain. The steps
+// in between are shift and add approximations of n/8, which is why no
+// multiplier and no DSP is involved.
+// ---------------------------------------------------------------------------
+
 module video_fade #(
-    parameter [3:0] FADE_MAX = 4'd8
+    parameter [3:0] FADE_MAX = 4'd8      // documentation only: the level is driven externally
 )(
-    input  wire        I_clk,
-    input  wire        I_rst,
-    input  wire        I_frame_start,
-    input  wire        I_start,
     input  wire        I_display_valid,
+    input  wire [3:0]  I_level,
     input  wire [23:0] I_rgb,
     output wire [23:0] O_rgb
 );
 
-reg [3:0] fade_level;
-reg       fade_active;
-
 assign O_rgb = I_display_valid ? {
-    scale_channel(I_rgb[23:16], fade_level),
-    scale_channel(I_rgb[15:8],  fade_level),
-    scale_channel(I_rgb[7:0],   fade_level)
+    scale_channel(I_rgb[23:16], I_level),
+    scale_channel(I_rgb[15:8],  I_level),
+    scale_channel(I_rgb[7:0],   I_level)
 } : 24'd0;
-
-always @(posedge I_clk or posedge I_rst) begin
-    if (I_rst) begin
-        fade_level  <= FADE_MAX;
-        fade_active <= 1'b0;
-    end else if (!I_display_valid) begin
-        fade_level  <= 4'd0;
-        fade_active <= 1'b0;
-    end else if (I_start) begin
-        fade_level  <= 4'd0;
-        fade_active <= 1'b1;
-    end else if (fade_active && I_frame_start) begin
-        if (fade_level >= FADE_MAX) begin
-            fade_level  <= FADE_MAX;
-            fade_active <= 1'b0;
-        end else begin
-            fade_level <= fade_level + 4'd1;
-        end
-    end
-end
 
 function [7:0] scale_channel;
     input [7:0] ch;

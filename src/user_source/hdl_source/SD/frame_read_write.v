@@ -10,7 +10,11 @@ module frame_read_write
 	parameter BURST_SIZE             = 256,
 	parameter WRITE_V_FLIP           = 1,      // 1: vertical flip when writing TF/BMP frame into SDRAM
 	parameter FRAME_WIDTH            = 640,
-	parameter FRAME_HEIGHT           = 480
+	parameter FRAME_HEIGHT           = 480,
+	//Stage 4 vertical wipe, forwarded to frame_fifo_read. See the geometry
+	//comment there for why a group is two lines.
+	parameter [8:0] WIPE_GRP_MAX     = 9'd240,
+	parameter [8:0] WIPE_GRP_STEP    = 9'd8
 ) 
 (
 	input                            rst,                  
@@ -41,6 +45,7 @@ module frame_read_write
 	input[ADDR_BITS - 1:0]           read_addr_2,                // data read module read request base address 1, used when read_addr_index = 2
 	input[ADDR_BITS - 1:0]           read_addr_3,                // data read module read request base address 1, used when read_addr_index = 3
 	input[1:0]                       read_addr_index,            // select valid base address from read_addr_0 read_addr_1 read_addr_2 read_addr_3
+	input[1:0]                       read_addr_index_top,        // stage 4: selector above the wipe boundary, equal to read_addr_index when idle
 	input[ADDR_BITS - 1:0]           read_len,                   // data read module read request data length
 	input                            read_en,                    // data read module read request for one data, read_data valid next clock
 	output[READ_DATA_BITS  - 1:0]    read_data,                  // read data
@@ -69,7 +74,14 @@ module frame_read_write
 	input[1:0]                       write_addr_index,           // select valid base address from write_addr_0 write_addr_1 write_addr_2 write_addr_3
 	input[ADDR_BITS - 1:0]           write_len,                  // data write module write request data length
 	input                            write_en,                   // data write module write request for one data
-	input[WRITE_DATA_BITS - 1:0]     write_data                 // write data
+	input[WRITE_DATA_BITS - 1:0]     write_data,                // write data
+
+	// Write-side FIFO occupancy, exposed so the scaler inside sd_card_bmp can
+	// apply backpressure from inside the write_clk domain. It was left
+	// unconnected before. The IP drives it combinationally as wr_addr minus
+	// shift_rdaddr, and both of those are write_clk-domain registers, so
+	// exposing it adds no clock-domain crossing.
+	output[8:0]                      write_fifo_usedw
 
 );
 wire[BURST_BITS - 1:0]                           wrusedw;                    // write used words
@@ -99,7 +111,7 @@ wfifo_32_32_512 write_buf
 	.di                       	(write_data               ),          // Input Data
 	.empty_flag                 (                         ),          // Read side Empty flag
 	.full_flag                  (                         ),          // Write side Full flag
-	.wrusedw                	(              	  		  ),          // Read Used Words
+	.wrusedw                	(write_fifo_usedw       ),          // Write-side occupancy, scaler backpressure
 	.rdusedw                	(rdusedw                  ),          // Write Used Words
 	.dout                       (App_wr_din		          )
 );
@@ -162,7 +174,9 @@ frame_fifo_read
 	.MEM_DATA_BITS              (MEM_DATA_BITS            ),
 	.ADDR_BITS                  (ADDR_BITS                ),
 	.BURST_BITS                 (BURST_BITS               ),
-	.BURST_SIZE                 (BURST_SIZE               )
+	.BURST_SIZE                 (BURST_SIZE               ),
+	.WIPE_GRP_MAX               (WIPE_GRP_MAX             ),
+	.WIPE_GRP_STEP              (WIPE_GRP_STEP            )
 )
 frame_fifo_read_m0
 (
@@ -185,6 +199,7 @@ frame_fifo_read_m0
 	.read_addr_2                (read_addr_2              ),
 	.read_addr_3                (read_addr_3              ),
 	.read_addr_index            (read_addr_index          ),    
+	.read_addr_index_top        (read_addr_index_top      ),
 	.read_len                   (read_len                 ),
 	.fifo_aclr                  (read_fifo_aclr           ),
 	.wrusedw                	(wrusedw                  )

@@ -22,8 +22,6 @@ module bmp_read(
 
     input                       sd_init_done,
     output reg [3:0]            state_code,
-    input  [15:0]               bmp_width,
-    input  [15:0]               bmp_height,
 
     output reg                  write_req,
     input                       write_req_ack,
@@ -35,7 +33,15 @@ module bmp_read(
     input                       sd_sec_read_end,
 
     output reg                  bmp_data_wr_en,
-    output reg [23:0]           bmp_data
+    output reg [23:0]           bmp_data,
+
+    // Source geometry parsed from the BMP header and handed to scaler_nn.
+    // src_dim_valid is a one-cycle pulse raised at the same moment write_req
+    // goes high, i.e. at the end of ST_LOAD_HDR, so the scaler is armed a full
+    // SD command ahead of the first pixel of ST_LOAD_DATA.
+    output reg [15:0]           src_width,
+    output reg [15:0]           src_height,
+    output reg                  src_dim_valid
 );
 
 localparam ST_IDLE       = 4'd0;
@@ -48,6 +54,16 @@ localparam ST_LOAD_DATA  = 4'd6;
 localparam ST_SCAN_ROOT  = 4'd7;
 
 localparam [7:0] ROOT_SCAN_MAX_SECTORS = 8'd128;
+
+// Accepted source geometry. The lower bound is what guarantees scaler_nn can
+// drain a destination row before the next source row finishes arriving (see
+// the timing argument in scaler_nn.v); the upper bound is the largest frame
+// the SD read timeout in sd_card_bmp.v is sized for. A top-down BMP encodes a
+// negative biHeight, whose upper half is non-zero, so it is rejected here.
+localparam [15:0] SRC_W_MIN = 16'd64;
+localparam [15:0] SRC_W_MAX = 16'd1920;
+localparam [15:0] SRC_H_MIN = 16'd64;
+localparam [15:0] SRC_H_MAX = 16'd1080;
 
 reg [3:0]  state;
 reg [9:0]  rd_cnt;
@@ -94,17 +110,31 @@ reg [15:0] dir_cluster_lo;
 reg [31:0] dir_file_size;
 
 wire reading_sector;
-wire header_match;
+wire header_match_c;
+reg  header_match_r;
+reg  width_ok_r;
+reg  height_ok_r;
 wire bmp_data_valid;
+wire in_pixel_region;
+wire [31:0] w3_calc;
+wire [31:0] stride_calc;
+reg  [15:0] src_w3;
+reg  [15:0] src_stride;
+reg  [15:0] row_byte_cnt;
 wire [31:0] file_sector_count;
-wire [31:0] next_scan_sector_if_match;
-wire [31:0] next_scan_sector_if_miss;
+reg  [31:0] file_sector_count_r;
+reg  [31:0] next_scan_sector_if_match;
+reg  [31:0] next_scan_sector_if_miss;
 wire [31:0] bpb_fat_size;
 wire [31:0] bpb_fat_area_sectors;
 wire [31:0] bpb_data_start_calc;
 wire [31:0] bpb_root_dir_calc;
+reg  [31:0] root_cluster_offset_r;
+reg  [31:0] dir_cluster_offset_r;
 wire        boot_is_fat32;
 wire        mbr_has_partition;
+reg         boot_geom_ok_r;
+reg         mbr_geom_ok_r;
 wire [31:0] dir_entry_cluster;
 wire [31:0] dir_file_size_now;
 wire        dir_ext_is_bmp;
@@ -118,18 +148,71 @@ assign reading_sector = (state == ST_SCAN_BOOT) ||
                         (state == ST_SCAN_RAW)  ||
                         (state == ST_LOAD_HDR);
 
-assign header_match = (header_0 == "B") &&
-                      (header_1 == "M") &&
-                      (width[15:0]  == bmp_width) &&
-                      (height[15:0] == bmp_height) &&
-                      (bit_count    == 16'd24) &&
-                      (compression  == 32'd0);
+// Header validation is now a range check on the parsed geometry instead of an
+// equality check against a hard-coded display size, which is what lets the
+// scaler accept arbitrary resolutions. The geometry compares are registered:
+// four wide comparators feeding straight into the ST_SCAN_RAW / ST_LOAD_HDR
+// decision would land in the sd_card_clk domain, which only has about 4%
+// margin. The parsed fields settle at rd_cnt == 33 while header_match_r is not
+// sampled until sd_sec_read_end near rd_cnt == 511, so two cycles of latency
+// are invisible.
+assign header_match_c = (header_0 == "B") &&
+                        (header_1 == "M") &&
+                        width_ok_r &&
+                        height_ok_r &&
+                        (bit_count   == 16'd24) &&
+                        (compression == 32'd0);
+
+// Padding gate. A 24-bit BMP row is padded up to a multiple of four bytes, so
+// any width that is not itself a multiple of four carries padding bytes that
+// must not be mistaken for pixel data. 640 * 3 = 1920 happens to be aligned,
+// which is why the previous version got away without this.
+assign in_pixel_region = (bmp_len_cnt >= pixel_offset) &&
+                         (bmp_len_cnt <  file_len);
 assign bmp_data_valid = (sd_sec_read_data_valid == 1'b1) &&
-                        (bmp_len_cnt >= pixel_offset) &&
-                        (bmp_len_cnt <  file_len);
+                        in_pixel_region &&
+                        (row_byte_cnt < src_w3);
+
+assign w3_calc     = width + (width << 1);
+assign stride_calc = (w3_calc + 32'd3) & 32'hffff_fffc;
 assign file_sector_count = (file_len == 32'd0) ? 32'd1 : ((file_len + 32'd511) >> 9);
-assign next_scan_sector_if_match = scan_sector + file_sector_count;
-assign next_scan_sector_if_miss  = scan_sector + 32'd1;
+
+// ---------------------------------------------------------------------------
+// Two-stage pipeline for the ST_SCAN_RAW sector address arithmetic.
+//
+// This used to be one purely combinational chain:
+//   file_len -> (+511) -> >>9 -> mux -> file_sector_count
+//            -> (+scan_sector)          -> next_scan_sector_if_match
+//            -> (> scan_max_sector)     -> scan_done
+// Two 32-bit adders plus a 32-bit comparator in series measured at Logic
+// Level 10 (ADDER=4 LUT5=3 LUT4=3) with a 9.686ns data path against a 10ns
+// budget -- the worst path of the sd_card_clk domain (Fmax 100.341MHz, only
+// 0.034ns of margin).
+//
+// Splitting it into two register stages leaves a single adder per stage.
+// This is functionally exact, not an approximation, because both operands are
+// stable long before the result is consumed:
+//   * file_len is written at the very beginning of the streamed sector
+//     (rd_cnt = 2..5, see the header parse block above), whereas
+//     next_scan_sector_if_match is only consumed at sd_sec_read_end, i.e.
+//     after rd_cnt has walked the whole 512-byte sector. That is several
+//     hundred data_valid cycles of slack.
+//   * scan_sector does not change during a sector read at all; it is only
+//     updated at sd_sec_read_end or on entry to ST_SCAN_RAW.
+// So the extra 1~2 cycles of latency are far shorter than the time until the
+// consumer samples the value, and no behaviour changes.
+// ---------------------------------------------------------------------------
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        file_sector_count_r       <= 32'd1;
+        next_scan_sector_if_match <= 32'd0;
+        next_scan_sector_if_miss  <= 32'd0;
+    end else begin
+        file_sector_count_r       <= file_sector_count;
+        next_scan_sector_if_match <= scan_sector + file_sector_count_r;
+        next_scan_sector_if_miss  <= scan_sector + 32'd1;
+    end
+end
 
 assign bpb_fat_size = (bpb_fat_size16 != 16'd0) ? {16'd0, bpb_fat_size16} : bpb_fat_size32;
 assign bpb_fat_area_sectors = (bpb_num_fats == 8'd1) ? bpb_fat_size :
@@ -138,16 +221,86 @@ assign bpb_fat_area_sectors = (bpb_num_fats == 8'd1) ? bpb_fat_size :
 assign bpb_data_start_calc = boot_sector_lba +
                              {16'd0, bpb_reserved_sectors} +
                              bpb_fat_area_sectors;
-assign bpb_root_dir_calc = data_start_sector +
-                           cluster_sector_offset(bpb_root_cluster - 32'd2, bpb_sec_per_cluster);
+// ---------------------------------------------------------------------------
+// Registered cluster->sector offset for the FAT32 root directory.
+//
+// bpb_root_dir_calc used to be built fully combinationally:
+//   bpb_root_cluster -> (-2) -> 8-way shift mux on bpb_sec_per_cluster
+//                    -> (+ data_start_sector) -> dir_sector / sd_sec_read_addr
+// That measured at Logic Level 9 (subtractor + 3 mux levels + adder) with a
+// 13.971ns arrival against the 10ns sd_card_clk budget -- the worst path of the
+// domain once the ST_SCAN_RAW chain above was pipelined.
+//
+// Only the offset half is registered, NOT bpb_root_dir_calc as a whole. This
+// distinction is load-bearing:
+//   * bpb_sec_per_cluster is parsed at rd_cnt == 13 and bpb_root_cluster at
+//     rd_cnt == 44..47, so the offset is settled roughly 460 cycles before
+//     sd_sec_read_end releases ST_SCAN_BOOT. One cycle of latency is invisible.
+//   * data_start_sector, on the other hand, is loaded at that very
+//     sd_sec_read_end (ST_SCAN_BOOT), and ST_SCAN_ROOT consumes
+//     bpb_root_dir_calc on the immediately following cycle. Registering the
+//     whole sum would therefore sample a stale data_start_sector and compute
+//     the wrong root directory sector.
+// Keeping the final adder combinational preserves the original behaviour
+// exactly while removing the subtractor and the shift mux from the path.
+// ---------------------------------------------------------------------------
+always @(posedge clk or posedge rst) begin
+    if (rst) root_cluster_offset_r <= 32'd0;
+    else     root_cluster_offset_r <= cluster_sector_offset(bpb_root_cluster - 32'd2, bpb_sec_per_cluster);
+end
+
+assign bpb_root_dir_calc = data_start_sector + root_cluster_offset_r;
+
+// ---------------------------------------------------------------------------
+// Same registered-offset treatment for the per-entry directory cluster.
+//
+// dir_file_sector_now has exactly the structure that bpb_root_dir_calc used to
+// have (32-bit subtractor -> 8-way shift mux on bpb_sec_per_cluster -> 32-bit
+// adder), and after the two fixes above it became the worst remaining path of
+// the sd_card_clk domain:
+//   bpb_sec_per_cluster_reg[5] -> scan_found_sector_reg[28], 9.617ns, +0.103ns
+// That leaves only 1.04% margin at 100MHz, which is not enough headroom to
+// absorb the scaler that stage 3 adds to this same clock domain.
+//
+// Only the offset half is registered. Safety margin, verified against the
+// directory-entry parse sequence:
+//   * dir_cluster_hi is captured at rd_cnt[4:0] == 20/21 and dir_cluster_lo at
+//     == 26/27, while the single consumer (scan_found_sector <= ) samples at
+//     == 31. The cluster number is therefore stable for 4 cycles before use,
+//     so one cycle of latency is invisible and the register still holds the
+//     value derived from the same entry.
+//   * data_start_sector is kept in the combinational final adder, exactly as
+//     for bpb_root_dir_calc, so no staleness can reach the sector address.
+// ---------------------------------------------------------------------------
+always @(posedge clk or posedge rst) begin
+    if (rst) dir_cluster_offset_r <= 32'd0;
+    else     dir_cluster_offset_r <= cluster_sector_offset(dir_entry_cluster - 32'd2, bpb_sec_per_cluster);
+end
+// Everything boot_is_fat32 tests apart from the two signature bytes is
+// captured by rd_cnt 47, and mbr_has_partition apart from nothing at all is
+// captured by rd_cnt 457, while the FSM only acts on either of them at
+// sd_sec_read_end past byte 511. Pre-registering that half is therefore
+// invisible to the state machine, and it lifts the 32-bit bpb_root_cluster
+// comparator carry chain out of the sd_card_clk critical path: that chain plus
+// the FSM decode behind it was the worst path in the design once the scaler
+// raised utilisation enough for placement to spread it out.
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        boot_geom_ok_r <= 1'b0;
+        mbr_geom_ok_r  <= 1'b0;
+    end else begin
+        boot_geom_ok_r <= (bpb_bytes_per_sector == 16'd512) &&
+                          (bpb_sec_per_cluster  != 8'd0)    &&
+                          (bpb_num_fats         != 8'd0)    &&
+                          (bpb_fat_size         != 32'd0)   &&
+                          (bpb_root_cluster     >= 32'd2);
+        mbr_geom_ok_r  <= (mbr_part_type != 8'd0) && (mbr_part_lba != 32'd0);
+    end
+end
 assign boot_is_fat32 = (boot_sig0 == 8'h55) &&
                        (boot_sig1 == 8'haa) &&
-                       (bpb_bytes_per_sector == 16'd512) &&
-                       (bpb_sec_per_cluster != 8'd0) &&
-                       (bpb_num_fats != 8'd0) &&
-                       (bpb_fat_size != 32'd0) &&
-                       (bpb_root_cluster >= 32'd2);
-assign mbr_has_partition = (mbr_part_type != 8'd0) && (mbr_part_lba != 32'd0);
+                       boot_geom_ok_r;
+assign mbr_has_partition = mbr_geom_ok_r;
 
 assign dir_entry_cluster = {dir_cluster_hi, dir_cluster_lo};
 assign dir_file_size_now = {sd_sec_read_data, dir_file_size[23:0]};
@@ -162,8 +315,7 @@ assign dir_entry_is_file = (dir_first_byte != 8'h00) &&
                            (dir_entry_cluster >= 32'd2) &&
                            (dir_file_size_now != 32'd0);
 assign dir_entry_is_bmp_now = dir_entry_is_file && dir_ext_is_bmp;
-assign dir_file_sector_now = data_start_sector +
-                             cluster_sector_offset(dir_entry_cluster - 32'd2, bpb_sec_per_cluster);
+assign dir_file_sector_now = data_start_sector + dir_cluster_offset_r;
 
 function [31:0] cluster_sector_offset;
     input [31:0] cluster_delta;
@@ -321,6 +473,54 @@ always @(posedge clk or posedge rst) begin
     end
 end
 
+// Byte index inside the current source row, used to drop the 4-byte alignment
+// padding. It advances on every byte of the pixel region, padding included,
+// and wraps at the row stride, which keeps it aligned with bmp_len_cnt.
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        row_byte_cnt <= 16'd0;
+    end else if (state == ST_LOAD_DATA) begin
+        if (sd_sec_read_data_valid && in_pixel_region) begin
+            if ((row_byte_cnt + 16'd1) >= src_stride)
+                row_byte_cnt <= 16'd0;
+            else
+                row_byte_cnt <= row_byte_cnt + 16'd1;
+        end
+    end else begin
+        row_byte_cnt <= 16'd0;
+    end
+end
+
+// Registered geometry validation plus the derived row pitch. All of these are
+// quasi-static for the whole image: width and height are parsed once during
+// ST_LOAD_HDR and never change until the next header.
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        width_ok_r  <= 1'b0;
+        height_ok_r <= 1'b0;
+        src_w3      <= 16'd0;
+        src_stride  <= 16'd0;
+        src_width   <= 16'd0;
+        src_height  <= 16'd0;
+    end else begin
+        width_ok_r  <= (width[31:16]  == 16'd0) &&
+                       (width[15:0]   >= SRC_W_MIN) &&
+                       (width[15:0]   <= SRC_W_MAX);
+        height_ok_r <= (height[31:16] == 16'd0) &&
+                       (height[15:0]  >= SRC_H_MIN) &&
+                       (height[15:0]  <= SRC_H_MAX);
+        src_w3      <= w3_calc[15:0];
+        src_stride  <= stride_calc[15:0];
+        src_width   <= width[15:0];
+        src_height  <= height[15:0];
+    end
+end
+
+always @(posedge clk or posedge rst) begin
+    if (rst) header_match_r <= 1'b0;
+    else     header_match_r <= header_match_c;
+end
+
 always @(posedge clk or posedge rst) begin
     if (rst) begin
         bmp_byte_idx <= 2'd0;
@@ -371,6 +571,7 @@ always @(posedge clk or posedge rst) begin
         sd_sec_read_addr     <= 32'd0;
         write_req            <= 1'b0;
         load_failed          <= 1'b0;
+        src_dim_valid        <= 1'b0;
         scan_done            <= 1'b0;
         scan_found_valid     <= 1'b0;
         scan_found_sector    <= 32'd0;
@@ -390,6 +591,7 @@ always @(posedge clk or posedge rst) begin
         sd_sec_read_addr     <= 32'd0;
         write_req            <= 1'b0;
         load_failed          <= 1'b0;
+        src_dim_valid        <= 1'b0;
         scan_done            <= 1'b0;
         scan_found_valid     <= 1'b0;
         scan_found_sector    <= 32'd0;
@@ -408,11 +610,13 @@ always @(posedge clk or posedge rst) begin
         sd_sec_read          <= 1'b0;
         write_req            <= 1'b0;
         load_failed          <= 1'b0;
+        src_dim_valid        <= 1'b0;
         scan_found_valid     <= 1'b0;
         load_sector_latched  <= 32'd0;
     end else begin
         scan_found_valid <= 1'b0;
         load_failed      <= 1'b0;
+        src_dim_valid    <= 1'b0;
 
         case (state)
             ST_IDLE: begin
@@ -514,7 +718,7 @@ always @(posedge clk or posedge rst) begin
                 if (sd_sec_read_end) begin
                     sd_sec_read <= 1'b0;
 
-                    if (header_match) begin
+                    if (header_match_r) begin
                         scan_found_valid  <= 1'b1;
                         scan_found_sector <= scan_sector;
                         scan_found_total  <= scan_found_total + 3'd1;
@@ -546,7 +750,8 @@ always @(posedge clk or posedge rst) begin
 
                 if (sd_sec_read_end) begin
                     sd_sec_read <= 1'b0;
-                    if (header_match) begin
+                    if (header_match_r) begin
+                        src_dim_valid    <= 1'b1;
                         write_req        <= 1'b1;
                         sd_sec_read_addr <= load_sector_latched;
                         state            <= ST_LOAD_WAIT;

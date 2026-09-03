@@ -2,15 +2,23 @@ module sd_card_bmp #(
     parameter integer CLK_FREQ_HZ       = 100_000_000,
     parameter [31:0]  SCAN_START_SECTOR = 32'd0,
     parameter [31:0]  SCAN_MAX_SECTOR   = 32'd131071,
-    parameter [2:0]   SCAN_TARGET_COUNT = 3'd4
+    parameter [2:0]   SCAN_TARGET_COUNT = 3'd4,
+    // Extra attempts per picture after the first one. sd_card_sec_read_write
+    // already retries a missed start token three times, but when all three
+    // miss it skips the sector and keeps going. During ST_LOAD_DATA that
+    // shifts every later pixel by 512 bytes; during ST_LOAD_HDR it produces a
+    // headerless sector, header_match_r fails, load_failed fires, and the
+    // picture would be lost for good -- next_load_idx has already advanced
+    // past it and nothing ever walks it back. Retrying the whole picture from
+    // its header is what turns a transient bit error into a slightly longer
+    // startup instead of a permanently short carousel.
+    parameter [2:0]   LOAD_MAX_RETRY    = 3'd3
 )(
     input                       clk,
     input                       rst,
     input                       key_next,
     input                       key_auto,
     output [3:0]                state_code,
-    input  [15:0]               bmp_width,
-    input  [15:0]               bmp_height,
     output reg                  display_valid,
     output                      auto_play_enabled,
 
@@ -22,6 +30,11 @@ module sd_card_bmp #(
     input                       write_req_ack,
     output                      write_en,
     output [31:0]               write_data,
+
+    // Occupancy of the write-side async FIFO, routed out of frame_read_write so
+    // the scaler can apply backpressure from inside this clock domain.
+    input  [8:0]                write_fifo_usedw,
+
     output                      SD_nCS,
     output                      SD_DCLK,
     output                      SD_MOSI,
@@ -38,6 +51,11 @@ wire             sd_sec_read_data_valid;
 wire             sd_sec_read_end;
 wire             bmp_data_wr_en;
 wire [23:0]      bmp_data;
+wire [15:0]      bmp_src_width;
+wire [15:0]      bmp_src_height;
+wire             bmp_src_dim_valid;
+wire             scaler_dst_valid;
+wire [23:0]      scaler_dst_pixel;
 wire             sd_init_done;
 wire             bmp_ready;
 wire [3:0]       bmp_state_code;
@@ -71,6 +89,7 @@ reg              source_done_seen;
 reg              write_done_seen;
 reg [31:0]       load_stall_cnt;
 reg              load_abort;
+reg [2:0]        load_retry_cnt;
 
 reg [2:0]        wrfin_tgl_sync;
 wire             write_finish_pulse;
@@ -82,17 +101,35 @@ wire       write_done_now;
 wire       load_complete_now;
 wire       load_progress;
 wire [2:0] loaded_count_plus_one;
+wire       load_stall_hit;
+wire       load_gave_up;
 
-assign write_en   = bmp_data_wr_en;
-assign write_data = {bmp_data[23:16], bmp_data[15:8], bmp_data[7:0], 8'b0};
+// The scaler owns the write stream now. It emits exactly FRAME_WIDTH *
+// FRAME_HEIGHT pixels per image whatever the source geometry, which is what
+// keeps write_len and the WRITE_V_FLIP row addressing in frame_fifo_write
+// valid without any change there. bmp_data_wr_en only feeds the scaler.
+assign write_en   = scaler_dst_valid;
+assign write_data = {scaler_dst_pixel, 8'b0};
 assign auto_tick  = (auto_cnt == (CLK_FREQ_HZ - 1));
 assign next_from_loaded = next_index_limited(img_idx, img_loaded_count);
 assign write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
 assign source_done_now = source_done_seen | (load_busy && bmp_ready);
 assign write_done_now  = write_done_seen  | (load_busy && write_finish_pulse);
 assign load_complete_now = load_busy && source_done_now && write_done_now;
-assign load_progress = bmp_data_wr_en || write_finish_pulse || write_req_ack;
+// The stall watchdog is fed by anything that shows the load is still moving.
+// scaler_dst_valid is included because the source stream ends before the
+// destination stream does whenever the scaler has black border rows left to
+// emit.
+assign load_progress = bmp_data_wr_en || scaler_dst_valid || write_finish_pulse || write_req_ack;
 assign loaded_count_plus_one = img_loaded_count + 3'd1;
+// The 1s silence watchdog. Named here rather than spelled out inline because
+// the retry decision below has to cover it as well as load_failed: from this
+// module's point of view a picture that stopped moving and a picture whose
+// header came back unreadable are the same event, an attempt that did not
+// produce a frame buffer worth keeping.
+assign load_stall_hit = load_busy && !load_progress &&
+                        (load_stall_cnt >= CLK_FREQ_HZ - 1);
+assign load_gave_up   = (load_busy && load_failed) || load_stall_hit;
 assign auto_play_enabled = auto_play_en;
 assign state_code = (!sd_init_done)                 ? 4'd0 :
                     (display_valid && auto_play_en) ? 4'd6 :
@@ -176,6 +213,7 @@ always @(posedge clk or posedge rst) begin
         write_done_seen       <= 1'b0;
         load_stall_cnt        <= 32'd0;
         load_abort            <= 1'b0;
+        load_retry_cnt        <= 3'd0;
         display_valid         <= 1'b0;
     end else begin
         wrfin_tgl_sync   <= {wrfin_tgl_sync[1:0], write_finish_toggle};
@@ -205,6 +243,7 @@ always @(posedge clk or posedge rst) begin
             write_done_seen       <= 1'b0;
             load_stall_cnt        <= 32'd0;
             load_abort            <= 1'b0;
+            load_retry_cnt        <= 3'd0;
             display_valid         <= 1'b0;
             scan_raw_only         <= 1'b0;
             raw_fallback_started  <= 1'b0;
@@ -228,16 +267,35 @@ always @(posedge clk or posedge rst) begin
             if (load_busy && write_finish_pulse)
                 write_done_seen <= 1'b1;
 
-            if (load_busy && load_failed) begin
+            if (load_gave_up) begin
+                // bmp_read rejected the header sector, or the picture stopped
+                // moving for a whole second. Either way this attempt left
+                // nothing worth keeping in the frame buffer.
                 load_busy        <= 1'b0;
                 source_done_seen <= 1'b0;
                 write_done_seen  <= 1'b0;
                 load_stall_cnt   <= 32'd0;
+                // Only the stall path needs to be told to let go: on
+                // load_failed bmp_read has already put itself back in
+                // ST_IDLE.
+                load_abort       <= load_stall_hit;
+
+                // Walking next_load_idx back re-arms the same picture: the
+                // re-arm branch below reads sector_lut(next_load_idx) and
+                // load_buf_idx from img_loaded_count, which did not advance,
+                // so the retry re-reads the same file into the same buffer.
+                if (load_retry_cnt < LOAD_MAX_RETRY) begin
+                    load_retry_cnt <= load_retry_cnt + 3'd1;
+                    next_load_idx  <= next_load_idx - 3'd1;
+                end else begin
+                    load_retry_cnt <= 3'd0;
+                end
             end else if (load_complete_now) begin
                 load_busy        <= 1'b0;
                 source_done_seen <= 1'b0;
                 write_done_seen  <= 1'b0;
                 load_stall_cnt   <= 32'd0;
+                load_retry_cnt   <= 3'd0;
 
                 if (img_loaded_count < SCAN_TARGET_COUNT)
                     img_loaded_count <= loaded_count_plus_one;
@@ -249,17 +307,10 @@ always @(posedge clk or posedge rst) begin
                     first_image_committed <= 1'b1;
                 end
             end else if (load_busy) begin
-                if (load_progress) begin
+                if (load_progress)
                     load_stall_cnt <= 32'd0;
-                end else if (load_stall_cnt >= CLK_FREQ_HZ - 1) begin
-                    load_busy        <= 1'b0;
-                    source_done_seen <= 1'b0;
-                    write_done_seen  <= 1'b0;
-                    load_stall_cnt   <= 32'd0;
-                    load_abort       <= 1'b1;
-                end else begin
+                else
                     load_stall_cnt <= load_stall_cnt + 32'd1;
-                end
             end else begin
                 load_stall_cnt <= 32'd0;
             end
@@ -284,6 +335,7 @@ always @(posedge clk or posedge rst) begin
                 write_done_seen       <= 1'b0;
                 load_stall_cnt        <= 32'd0;
                 load_abort            <= 1'b0;
+                load_retry_cnt        <= 3'd0;
                 scan_raw_only         <= 1'b0;
                 raw_fallback_started  <= 1'b0;
             end else begin
@@ -326,6 +378,7 @@ always @(posedge clk or posedge rst) begin
                     source_done_seen     <= 1'b0;
                     write_done_seen      <= 1'b0;
                     load_stall_cnt       <= 32'd0;
+                    load_retry_cnt       <= 3'd0;
                 end else if (scan_done && bmp_ready && !load_busy &&
                              (next_load_idx < img_found_count) &&
                              (img_loaded_count < SCAN_TARGET_COUNT)) begin
@@ -368,8 +421,6 @@ bmp_read bmp_read_m0(
 
     .sd_init_done           (sd_init_done),
     .state_code             (bmp_state_code),
-    .bmp_width              (bmp_width),
-    .bmp_height             (bmp_height),
     .write_req              (write_req),
     .write_req_ack          (write_req_ack),
     .sd_sec_read            (sd_sec_read),
@@ -378,7 +429,42 @@ bmp_read bmp_read_m0(
     .sd_sec_read_data_valid (sd_sec_read_data_valid),
     .sd_sec_read_end        (sd_sec_read_end),
     .bmp_data_wr_en         (bmp_data_wr_en),
-    .bmp_data               (bmp_data)
+    .bmp_data               (bmp_data),
+    .src_width              (bmp_src_width),
+    .src_height             (bmp_src_height),
+    .src_dim_valid          (bmp_src_dim_valid)
+);
+
+// Nearest-neighbour scaler, stage 3. Destination geometry is fixed at 640x480
+// to match FRAME_WIDTH/FRAME_HEIGHT in frame_read_write, because the
+// WRITE_V_FLIP row addressing there assumes exactly 640 pixels per stream row.
+scaler_nn #(
+    .DST_W                  (640),
+    .DST_H                  (480),
+    .MAX_UPSCALE            (4),
+    // 4096 parked source pixels. Sized in scaler_nn.v for the black border
+    // rows, which emit without consuming: off_y rows of 2 * DST_W cycles park
+    // off_y * 1280 / 96 pixels of a source stream that cannot be paused.
+    .SK_AW                  (12),
+    .STALL_THRESH           (384)
+) scaler_nn_m0 (
+    .clk                    (clk),
+    .rst                    (rst),
+    .i_src_valid            (bmp_data_wr_en),
+    .i_src_pixel            (bmp_data),
+    .i_dim_valid            (bmp_src_dim_valid),
+    .i_src_w                (bmp_src_width),
+    .i_src_h                (bmp_src_height),
+    .i_fifo_usedw           (write_fifo_usedw),
+    .o_dst_valid            (scaler_dst_valid),
+    .o_dst_pixel            (scaler_dst_pixel),
+    .o_busy                 (),
+    .o_done                 (),
+    // Sticky "the elastic buffer overflowed, this picture is wrong" flag, left
+    // open on purpose: it is a simulation and bring-up hook, and 4096 entries
+    // cover the border row bound for every geometry bmp_read accepts. Hook it
+    // to the OSD if a source ever needs more slack than that.
+    .o_overflow             ()
 );
 
 sd_card_top sd_card_top_m0(

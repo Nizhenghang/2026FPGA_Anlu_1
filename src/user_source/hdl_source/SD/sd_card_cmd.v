@@ -49,6 +49,16 @@ reg[15:0]                     byte_cnt;
 reg[7:0]                      send_data;
 wire[7:0]                     data_recv;
 reg[9:0]                      wr_data_cnt;
+// Read block timeout. S_READ_WAIT polls for the 0xFE data start token and S_READ
+// collects the 512 payload bytes. Neither loop can bound the card, so without an
+// escape a card that never drives 0xFE parks this machine in S_READ_WAIT forever,
+// which parks sd_card_sec_read_write in S_READ and bmp_read in ST_LOAD_*, and the
+// player dies holding whatever images happened to load before the miss.
+// 10_000_000 cycles at 100MHz is 100ms, the SD spec order for data token latency,
+// against ~0.19ms for a real 512 byte block at 25MHz SPI (~0.54ms at 8.3MHz), so a
+// healthy read cannot reach it.
+reg[23:0]                     read_timeout_cnt;
+localparam [23:0]             READ_TIMEOUT_MAX = 24'd10_000_000;
 
 assign cmd_req_ack = (state == S_END);
 assign block_read_req_ack = (state == S_READ_ACK);
@@ -69,6 +79,7 @@ begin
 		state <= S_IDLE;
 		cmd_req_error <= 1'b0;
 		wr_data_cnt <= 10'd0;
+		read_timeout_cnt <= 24'd0;
 	end
 	else
 		case(state)
@@ -107,7 +118,11 @@ begin
 				if(cmd_req == 1'b1)
 					state <= S_CMD_PRE;
 				else if(block_read_req == 1'b1)
+				begin
+					//arm the escape for this block read
 					state <= S_READ_WAIT;
+					read_timeout_cnt <= 24'd0;
+				end
 				else if(block_write_req == 1'b1)
 					state <= S_WRITE_TOKEN;
 				clk_div <= spi_clk_div;
@@ -198,11 +213,22 @@ begin
 			end
 			S_READ_WAIT:
 			begin
+				read_timeout_cnt <= read_timeout_cnt + 24'd1;
 				if(spi_wr_ack == 1'b1 && data_recv == 8'hfe)
 				begin
 					spi_wr_req <= 1'b0;
 					state <= S_READ;
 					byte_cnt <= 16'd0;
+					read_timeout_cnt <= 24'd0;
+				end
+				else if(read_timeout_cnt > READ_TIMEOUT_MAX)
+				begin
+					//no start token: report it and fall back to S_WAIT so the layer above
+					//can retry the sector. The later assignment wins, so the counter
+					//clears instead of counting on through the error states.
+					state <= S_ERR;
+					spi_wr_req <= 1'b0;
+					read_timeout_cnt <= 24'd0;
 				end
 				else
 				begin
@@ -212,6 +238,7 @@ begin
 			end
 			S_READ:
 			begin
+				read_timeout_cnt <= read_timeout_cnt + 24'd1;
 				if(spi_wr_ack == 1'b1)
 				begin
 					if(byte_cnt == 16'd513)
@@ -219,11 +246,23 @@ begin
 						state <= S_READ_ACK;
 						spi_wr_req <= 1'b0;
 						byte_cnt <= 16'd0;
+						read_timeout_cnt <= 24'd0;
 					end
 					else
 					begin
 						byte_cnt <= byte_cnt + 16'd1;
 					end
+				end
+				else if(read_timeout_cnt > READ_TIMEOUT_MAX)
+				begin
+					//spi_master acks every byte unconditionally, so this branch means the
+					//SPI layer itself stopped -- insurance, not an expected path. Unlike
+					//the S_READ_WAIT case some payload bytes were already delivered here,
+					//so a retry would duplicate them; sd_card_sec_read_write bounds that
+					//with RD_RETRY_MAX and then skips the sector.
+					state <= S_ERR;
+					spi_wr_req <= 1'b0;
+					read_timeout_cnt <= 24'd0;
 				end
 				else
 				begin

@@ -58,8 +58,16 @@ wire [23:0] vout_data;
 wire        display_valid;
 wire        auto_play_enabled;
 wire        key3_bright_press;
-wire        fade_start;
 wire        video_frame_start;
+
+// Stage 4 transition controller outputs, all video_clk domain. bot/top are the
+// two buffer selectors frame_fifo_read turns into read base addresses; they are
+// equal except while a vertical wipe is revealing the new picture from the top
+// of the panel down.
+wire [1:0]  trans_bot_idx;
+wire [1:0]  trans_top_idx;
+wire [1:0]  trans_img_idx;
+wire [3:0]  trans_fade_level;
 
 wire [3:0]  state_code;
 wire [6:0]  seg_data_0;
@@ -73,6 +81,9 @@ wire        sd_card_write_en;
 wire [31:0] sd_card_write_data;
 wire        sd_card_write_req;
 wire        sd_card_write_req_ack;
+// Write-side FIFO occupancy, routed from frame_read_write to the scaler inside
+// sd_card_bmp so backpressure never has to leave the sd_card_clk domain.
+wire [8:0]  sd_card_write_fifo_usedw;
 wire        frame_write_finish;
 reg         frame_write_toggle_mem;
 
@@ -86,11 +97,9 @@ reg         auto_play_v0;
 reg         auto_play_v1;
 reg         display_valid_v0;
 reg         display_valid_v1;
-reg         display_valid_prev;
 reg  [2:0]  brightness_level;
 reg  [2:0]  brightness_level_v0;
 reg  [2:0]  brightness_level_v1;
-reg  [1:0]  disp_buf_idx_prev;
 reg         vs_d;
 
 wire App_rd_en;
@@ -134,8 +143,11 @@ wire [9:0]  tmds_ch1_data;
 wire [9:0]  tmds_ch2_data;
 wire [9:0]  tmds_clk_data;
 
-assign fade_start = display_valid_v1 &&
-                    ((!display_valid_prev) || (disp_buf_idx_v1 != disp_buf_idx_prev));
+// video_frame_start fires on the vsync edge as seen AFTER video_delay's 20 tap
+// shift register, while video_timing_data raises read_req on the same edge seen
+// before it. So this pulse lands about 20 video clocks after the read request
+// that fetches the current frame, which is why video_transition treats an index
+// change made here as taking effect on the NEXT frame.
 assign video_frame_start = vs_d & ~vs;
 
 // 统一复位：TF 图像链路 + HDMI 音频链路
@@ -204,10 +216,8 @@ always @(posedge video_clk or posedge rst_all) begin
         auto_play_v1     <= 1'b0;
         display_valid_v0 <= 1'b0;
         display_valid_v1 <= 1'b0;
-        display_valid_prev <= 1'b0;
         brightness_level_v0 <= 3'd2;
         brightness_level_v1 <= 3'd2;
-        disp_buf_idx_prev <= 2'd0;
         vs_d <= 1'b0;
     end else begin
         disp_buf_idx_v0  <= disp_buf_idx;
@@ -218,10 +228,8 @@ always @(posedge video_clk or posedge rst_all) begin
         auto_play_v1     <= auto_play_v0;
         display_valid_v0 <= display_valid;
         display_valid_v1 <= display_valid_v0;
-        display_valid_prev <= display_valid_v1;
         brightness_level_v0 <= brightness_level;
         brightness_level_v1 <= brightness_level_v0;
-        disp_buf_idx_prev <= disp_buf_idx_v1;
         vs_d <= vs;
     end
 end
@@ -238,8 +246,6 @@ sd_card_bmp #(
     .key_next          (key1),
     .key_auto          (key2),
     .state_code        (state_code),
-    .bmp_width         (16'd640),
-    .bmp_height        (16'd480),
     .display_valid     (display_valid),
     .auto_play_enabled (auto_play_enabled),
 
@@ -251,6 +257,7 @@ sd_card_bmp #(
     .write_req_ack     (sd_card_write_req_ack),
     .write_en          (sd_card_write_en),
     .write_data        (sd_card_write_data),
+    .write_fifo_usedw  (sd_card_write_fifo_usedw),
     .SD_nCS            (sd_ncs),
     .SD_DCLK           (sd_dclk),
     .SD_MOSI           (sd_mosi),
@@ -309,12 +316,35 @@ video_brightness u_video_brightness (
     .O_rgb   (vout_data_bright)
 );
 
-video_fade u_video_fade (
+// Stage 4 transition controller. Decides when the panel is allowed to see a
+// buffer switch and how. sd_card_bmp still owns which picture is current; this
+// only gates the handover, so the SD side and the write side are untouched.
+video_transition #(
+    .FADE_MAX    (4'd8),
+    // Frames the two selectors are held apart. Must exceed the ramp length
+    // WIPE_GRP_MAX / WIPE_GRP_STEP = 240 / 8 = 30 frames in frame_read_write,
+    // plus margin for the one frame offset between I_frame_start and the read
+    // request that precedes it. 36 leaves 6 frames of saturated full new
+    // picture before the selectors are equalised again, and 38 frames end to
+    // end is 0.63s at 60Hz, inside the 1s auto play interval in sd_card_bmp,
+    // so a wipe always finishes before the picture is allowed to advance again.
+    .WIPE_HOLD   (6'd36),
+    .WIPE_SETTLE (6'd2)
+) u_video_transition (
     .I_clk           (video_clk),
     .I_rst           (rst_all),
     .I_frame_start   (video_frame_start),
-    .I_start         (fade_start),
     .I_display_valid (display_valid_v1),
+    .I_disp_idx      (disp_buf_idx_v1),
+    .O_bot_idx       (trans_bot_idx),
+    .O_top_idx       (trans_top_idx),
+    .O_img_idx       (trans_img_idx),
+    .O_fade_level    (trans_fade_level)
+);
+
+video_fade u_video_fade (
+    .I_display_valid (display_valid_v1),
+    .I_level         (trans_fade_level),
     .I_rgb           (vout_data_bright),
     .O_rgb           (vout_data_fade)
 );
@@ -343,7 +373,7 @@ osd_overlay #(
     .I_de            (de),
     .I_rgb           (vout_data_audio),
     .I_display_valid (display_valid_v1),
-    .I_image_index   (disp_buf_idx_v1),
+    .I_image_index   (trans_img_idx),
     .I_auto_play     (auto_play_v1),
     .I_brightness    (brightness_level_v1),
     .I_state_code    (state_code_v1),
@@ -374,7 +404,8 @@ frame_read_write #(
     .read_addr_1       (BUF1_ADDR),
     .read_addr_2       (BUF2_ADDR),
     .read_addr_3       (BUF3_ADDR),
-    .read_addr_index   (disp_buf_idx),
+    .read_addr_index   (trans_bot_idx),
+    .read_addr_index_top (trans_top_idx),
     .read_len          (FRAME_PIXELS),
     .read_en           (video_read_en),
     .read_data         (video_read_data),
@@ -395,7 +426,8 @@ frame_read_write #(
     .write_addr_index  (write_buf_idx),
     .write_len         (FRAME_PIXELS),
     .write_en          (sd_card_write_en),
-    .write_data        (sd_card_write_data)
+    .write_data        (sd_card_write_data),
+    .write_fifo_usedw  (sd_card_write_fifo_usedw)
 );
 
 sdram U3(
