@@ -448,9 +448,11 @@ sdram U3(
 );
 
 // ===================== 音频：内部 I2S 测试音 =====================
+// AMP is deliberately not overridden here: tools/sim_tone_gen.py parses it out
+// of the module, and an override at this level would let the model verify a
+// value the hardware never uses.
 hdmi_audio_tone_i2s_64fs #(
-    .PHASE_INC (32'd39370534),
-    .AMP       (24'sd2000000)
+    .PHASE_INC (32'd39370534)
 ) u_hdmi_audio_tone_i2s_64fs (
     .I_mclk      (audio_mclk),
     .I_rst       (rst_all),
