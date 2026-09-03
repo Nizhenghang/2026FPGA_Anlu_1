@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="HX4S20 EG4S20 FPGA board">
+  <rect x="2" y="2" width="60" height="60" rx="8" fill="#0f2438"/>
+  <rect x="18" y="18" width="28" height="28" rx="3" fill="#1d3f5e" stroke="#5ad1ff" stroke-width="2"/>
+  <g fill="#5ad1ff">
+    <rect x="24" y="10" width="3" height="8" rx="1"/>
+    <rect x="30.5" y="10" width="3" height="8" rx="1"/>
+    <rect x="37" y="10" width="3" height="8" rx="1"/>
+    <rect x="24" y="46" width="3" height="8" rx="1"/>
+    <rect x="30.5" y="46" width="3" height="8" rx="1"/>
+    <rect x="37" y="46" width="3" height="8" rx="1"/>
+    <rect x="10" y="24" width="8" height="3" rx="1"/>
+    <rect x="10" y="30.5" width="8" height="3" rx="1"/>
+    <rect x="10" y="37" width="8" height="3" rx="1"/>
+    <rect x="46" y="24" width="8" height="3" rx="1"/>
+    <rect x="46" y="30.5" width="8" height="3" rx="1"/>
+    <rect x="46" y="37" width="8" height="3" rx="1"/>
+  </g>
+  <text x="32" y="36" font-family="Consolas, monospace" font-size="9" font-weight="700" fill="#e8f6ff" text-anchor="middle">EG4S20</text>
+</svg>

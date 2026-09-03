@@ -1,0 +1,30 @@
+{
+  "name": "hx4s20-eg4s20-board",
+  "displayName": "康芯 HX4S20 / 安路 EG4S20 开发板专家",
+  "version": "0.1.0",
+  "description": "Board-specific reference assistant for the Kangxin HX4S20 (Anlogic EG4S20BG256) FPGA dev board: pinout lookup, chip specs, TD toolchain, Anlogic IP usage and the 2025/2026 contest lab examples.",
+  "descriptionZh": "康芯 HX4S20（安路 EG4S20BG256）FPGA 开发板专属资料助手：引脚查询、芯片规格、TD 工具链、安路 IP 用法与 2025/2026 赛题例程定位。",
+  "author": {
+    "name": "Nizhenghang"
+  },
+  "logo": "./assets/avatar.svg",
+  "keywords": [
+    "qoder-plugin",
+    "skill",
+    "fpga",
+    "anlogic",
+    "eg4s20",
+    "hx4s20",
+    "td-toolchain"
+  ],
+  "category": "developer-tools",
+  "tags": [
+    "skill",
+    "fpga",
+    "hardware-reference",
+    "board-support"
+  ],
+  "skills": "./skills/",
+  "marketplaceName": "local",
+  "defaultEnabled": true
+}
