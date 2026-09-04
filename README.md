@@ -2,7 +2,7 @@
 
 本项目面向 2026 安路赛道 FPGA 赛题一，在 HX4S20C 开发板上基于安路 EG4S20 FPGA 实现一个 HDMI 多媒体播放与展示系统。
 
-当前工程已完成 TF 卡 BMP 图片读取、**任意分辨率图片的片内最近邻缩放**、SDRAM 四缓冲帧存、HDMI 1.4b 音视频输出、按键交互、亮度调节、OSD 状态叠加、**淡入淡出与垂直擦除两种交替转场**、音频波形与频谱可视化，以及一整套无头构建脚本和周期精确验证模型。图片加载链路经过三层重试与看门狗加固，四张图片可在上电后一次性全部载入。
+当前工程已完成 TF 卡 BMP 图片读取、**任意分辨率图片的片内最近邻缩放**、SDRAM 四缓冲帧存、HDMI 1.4b 音视频输出、**TF 卡 WAV 真实音乐流式播放（单曲循环）**、按键交互、亮度调节、OSD 状态叠加、**淡入淡出与垂直擦除两种交替转场**、音频波形与频谱可视化，以及一整套无头构建脚本和周期精确验证模型。图片加载链路经过三层重试与看门狗加固，四张图片可在上电后一次性全部载入；图片载入完成后自动接管 SD 总线流式播放音乐，底部可视化随真实音乐跳动。
 
 ## 硬件平台
 
@@ -29,6 +29,23 @@
 - 建议使用 `doc/convert/convert_images_to_bmp.py` 统一转换。
 - 若卡上残留旧图片的物理扇区导致 FPGA 误读，用 `doc/convert/sync_to_sd.py` 重新同步。
 - 8.3 短文件名与长文件名（LFN）目录项都能正确识别，LFN 槽位（attr 0x0F）、已删除项、卷标和子目录会被排除。
+
+## 支持的音频格式
+
+```text
+容器：WAV（标准 44 字节 canonical 头，RIFF/WAVE/fmt (PCM)/data）
+采样：48000 Hz、立体声、16-bit 小端 PCM，帧交错 L_lo,L_hi,R_lo,R_hi
+文件：TF 卡根目录 MUSIC.WAV（8.3 短名，扩展名固定 WAV）
+```
+
+FPGA 不在片内解码 MP3——与图片管线一致（图片离线转无压缩 BMP、FPGA 只读原始字节），音频也离线用 ffmpeg 解码成无压缩 PCM，FPGA 只负责扇区流读、跨时钟域、48 kHz 采样节拍与单曲循环。
+
+注意：
+
+- 用 `doc/convert/convert_audio_to_wav.py INPUT.mp3 [输出路径]` 把任意音频离线转成符合上述契约的 `MUSIC.WAV`（手工拼 44 字节头，不用 ffmpeg 的容器写出，避免插入 LIST/INFO 块导致 data 偏移错位）。
+- 写卡用 `doc/convert/sync_to_sd.py F: --audio INPUT.mp3`：流程为「破坏旧 BMP 头 → 清空盘 → **先写 MUSIC.WAV** → 再按序号写 4 张 BMP」。WAV 先写有两个作用：① FAT32 根目录项按创建顺序排列，WAV 目录项排在 BMP 之前，`bmp_read` 在找满 4 张 BMP 提前停止前已扫到 WAV；② 空卡先写大文件更容易物理连续。
+- **强烈建议先把卡 FAT32 格式化再同步**：读卡逻辑不跟随 FAT32 簇链、假设文件物理连续（地址线性 +1），约 40 MB 的 WAV 一旦碎片化就会读到错乱数据。清空后的空卡先写 WAV 通常连续，但格式化能彻底保证。
+- 卡上找不到有效 WAV（或 RIFF/WAVE 校验失败）时输出静音，图片照常轮播，不回退测试音。
 
 ## 当前已实现内容
 
@@ -66,7 +83,8 @@
 
 - 基于 APUG092 HDMI 1.4b Transmitter IP，输出 640 x 480 @ 60 Hz（VIC 1）。
 - RGB 经 `video_rgb_to_axis_640x480` 转为 AXI-Stream 后送入发射核，`hdmi_phy_warpper` 串行化输出到 HDMI_B 差分接口。
-- `PLL_HDMI_AUDIO` 产生 12.288 MHz 音频主时钟，片内生成 I2S 测试音，`I2S_receiver` 解串为左右声道 24-bit PCM，`audio_arc_calculate` 生成 ACR 参数，音视频一并送入发射核。
+- 音频不再是片内合成测试音，而是 TF 卡真实音乐：四张图载入完成后 `sd_card_bmp` 把 SD 扇区读总线交给 `sd_audio_stream`，流式读取 `MUSIC.WAV`（跳过 44 字节头、按 4 字节组帧 {R,L}、放完回卷单曲循环），经异步 FIFO（`wfifo_32_32_512`）跨到 video_clk，`audio_pcm_player` 用小数分频产生 48 kHz 节拍把 16-bit PCM 左对齐成 24-bit 送入 `audio_arc_calculate`（ACR）、`audio_visualizer` 与发射核。欠载或无 WAV 时仍持续打 `audio_valid`（数据填 0）以保证 ACR 不断、HDMI 音频锁定。
+- `PLL_HDMI_AUDIO` 仍保留（复位树依赖其 lock），但 12.288 MHz 音频主时钟与 `hdmi_audio_tone_i2s_64fs.v` / `I2S_receiver.v` 已不再例化，文件保留在仓库便于调试回挂。
 - 上电后自动触发 EDID 读取。
 
 ### 6. 按键交互与 OSD
@@ -229,7 +247,10 @@ Slow / Fast 两个 corner 全部收敛，违例端点 0，全局 Setup WNS +0.71
 - `audio_visualizer.v`：底部波形、频谱柱和峰值显示叠加。
 - `osd_overlay.v`：展示型状态面板叠加，内置 8x8 字模。
 - `video_rgb_to_axis_640x480.v`：RGB/DE 转 AXI-Stream。
-- `hdmi_audio_tone_i2s_64fs.v` / `I2S_receiver.v` / `audio_arc_calculate.v`：I2S 测试音、解串与 ACR 参数。
+- `SD/sd_audio_stream.v`：sd_card_clk 域音乐流读器，扫描定位 `MUSIC.WAV` 后跳头、组帧 {R,L}、背压、放完回卷循环，写异步 FIFO。
+- `audio_pcm_player.v`：video_clk 域 48 kHz 节拍器，小数分频取 FIFO 前瞻数据、16→24-bit 左对齐输出，欠载时持续打 valid 填 0。
+- `audio_arc_calculate.v`：每 48 个 `audio_valid` 生成一次 ACR（CTS）参数，要求 valid 为稳定 48 kHz 脉冲流。
+- `hdmi_audio_tone_i2s_64fs.v` / `I2S_receiver.v`：原 I2S 测试音与解串，已不再例化，保留在仓库便于调试回挂。
 
 ## 备注
 

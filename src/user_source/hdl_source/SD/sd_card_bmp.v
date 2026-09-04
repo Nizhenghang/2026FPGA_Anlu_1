@@ -35,6 +35,14 @@ module sd_card_bmp #(
     // the scaler can apply backpressure from inside this clock domain.
     input  [8:0]                write_fifo_usedw,
 
+    // Audio stream FIFO write side. The async FIFO body lives in the top level
+    // (it crosses sd_card_clk -> video_clk); sd_card_bmp stays single-clock and
+    // only drives the write port and reads the write-side occupancy for the
+    // streamer's sector-boundary backpressure.
+    output                      aud_fifo_we,
+    output [31:0]               aud_fifo_di,
+    input  [8:0]                aud_fifo_wrusedw,
+
     output                      SD_nCS,
     output                      SD_DCLK,
     output                      SD_MOSI,
@@ -49,6 +57,15 @@ wire [31:0]      sd_sec_read_addr;
 wire [7:0]       sd_sec_read_data;
 wire             sd_sec_read_data_valid;
 wire             sd_sec_read_end;
+// Two disjoint consumers of the single SD sector-read port: bmp_read (pictures)
+// and sd_audio_stream (music). They never run at the same time -- audio_phase
+// only rises after the last picture is committed -- so a 2:1 mux on the request
+// and address is enough; the data/valid/end come back from sd_card_top and are
+// broadcast to both (the idle consumer ignores them).
+wire             bmp_sd_sec_read;
+wire [31:0]      bmp_sd_sec_read_addr;
+wire             aud_sd_sec_read;
+wire [31:0]      aud_sd_sec_read_addr;
 wire             bmp_data_wr_en;
 wire [23:0]      bmp_data;
 wire [15:0]      bmp_src_width;
@@ -63,6 +80,9 @@ wire             scan_done;
 wire             scan_found_valid;
 wire [31:0]      scan_found_sector;
 wire [2:0]       scan_found_total;
+wire             scan_found_wav_valid;
+wire [31:0]      scan_found_wav_sector;
+wire [31:0]      scan_found_wav_size;
 wire             load_failed;
 
 reg              scan_start_pulse;
@@ -91,6 +111,13 @@ reg [31:0]       load_stall_cnt;
 reg              load_abort;
 reg [2:0]        load_retry_cnt;
 
+// WAV directory entry captured during the scan, and the sticky flag that hands
+// the SD port over to sd_audio_stream once every picture is loaded.
+reg              wav_found;
+reg [31:0]       wav_sector;
+reg [31:0]       wav_size;
+reg              audio_phase;
+
 reg [2:0]        wrfin_tgl_sync;
 wire             write_finish_pulse;
 
@@ -110,6 +137,9 @@ wire       load_gave_up;
 // valid without any change there. bmp_data_wr_en only feeds the scaler.
 assign write_en   = scaler_dst_valid;
 assign write_data = {scaler_dst_pixel, 8'b0};
+// SD sector-read port ownership: pictures first, music after they are all in.
+assign sd_sec_read      = audio_phase ? aud_sd_sec_read      : bmp_sd_sec_read;
+assign sd_sec_read_addr = audio_phase ? aud_sd_sec_read_addr : bmp_sd_sec_read_addr;
 assign auto_tick  = (auto_cnt == (CLK_FREQ_HZ - 1));
 assign next_from_loaded = next_index_limited(img_idx, img_loaded_count);
 assign write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
@@ -215,6 +245,10 @@ always @(posedge clk or posedge rst) begin
         load_abort            <= 1'b0;
         load_retry_cnt        <= 3'd0;
         display_valid         <= 1'b0;
+        wav_found             <= 1'b0;
+        wav_sector            <= 32'd0;
+        wav_size              <= 32'd0;
+        audio_phase           <= 1'b0;
     end else begin
         wrfin_tgl_sync   <= {wrfin_tgl_sync[1:0], write_finish_toggle};
         scan_start_pulse <= 1'b0;
@@ -247,6 +281,10 @@ always @(posedge clk or posedge rst) begin
             display_valid         <= 1'b0;
             scan_raw_only         <= 1'b0;
             raw_fallback_started  <= 1'b0;
+            wav_found             <= 1'b0;
+            wav_sector            <= 32'd0;
+            wav_size              <= 32'd0;
+            audio_phase           <= 1'b0;
         end else begin
             if (scan_found_valid) begin
                 case (img_found_count)
@@ -260,6 +298,23 @@ always @(posedge clk or posedge rst) begin
                 if (img_found_count < 3'd4)
                     img_found_count <= img_found_count + 3'd1;
             end
+
+            // Capture the WAV directory entry (sector + byte size) the first
+            // time the scan reports it. bmp_read only ever emits this once.
+            if (scan_found_wav_valid) begin
+                wav_found  <= 1'b1;
+                wav_sector <= scan_found_wav_sector;
+                wav_size   <= scan_found_wav_size;
+            end
+
+            // Hand the SD sector-read port to the music streamer only once every
+            // picture is committed and bmp_read has gone idle, so the two
+            // consumers never overlap. Sticky until reset / card-pull re-scan,
+            // which keeps music playing across the whole slideshow and the
+            // single-track loop.
+            if (!audio_phase && wav_found && bmp_ready && !load_busy &&
+                (img_loaded_count >= SCAN_TARGET_COUNT))
+                audio_phase <= 1'b1;
 
             if (load_busy && bmp_ready)
                 source_done_seen <= 1'b1;
@@ -413,6 +468,9 @@ bmp_read bmp_read_m0(
     .scan_found_valid       (scan_found_valid),
     .scan_found_sector      (scan_found_sector),
     .scan_found_total       (scan_found_total),
+    .scan_found_wav_valid   (scan_found_wav_valid),
+    .scan_found_wav_sector  (scan_found_wav_sector),
+    .scan_found_wav_size    (scan_found_wav_size),
 
     .load_start             (load_start_pulse),
     .load_abort             (load_abort),
@@ -423,8 +481,8 @@ bmp_read bmp_read_m0(
     .state_code             (bmp_state_code),
     .write_req              (write_req),
     .write_req_ack          (write_req_ack),
-    .sd_sec_read            (sd_sec_read),
-    .sd_sec_read_addr       (sd_sec_read_addr),
+    .sd_sec_read            (bmp_sd_sec_read),
+    .sd_sec_read_addr       (bmp_sd_sec_read_addr),
     .sd_sec_read_data       (sd_sec_read_data),
     .sd_sec_read_data_valid (sd_sec_read_data_valid),
     .sd_sec_read_end        (sd_sec_read_end),
@@ -465,6 +523,30 @@ scaler_nn #(
     // cover the border row bound for every geometry bmp_read accepts. Hook it
     // to the OSD if a source ever needs more slack than that.
     .o_overflow             ()
+);
+
+// Music streamer. Shares the SD sector-read port with bmp_read via the mux
+// above; start is the sticky audio_phase level, so it begins only after the
+// last picture is committed and then loops the single track forever. Its FIFO
+// write side is routed straight out to the top level, where the async FIFO
+// crosses into video_clk.
+sd_audio_stream #(
+    .HDR_LEN                (44),
+    .PAUSE_THRESH           (9'd256)
+) sd_audio_stream_m0 (
+    .clk                    (clk),
+    .rst                    (rst),
+    .start                  (audio_phase),
+    .wav_start_sector       (wav_sector),
+    .wav_size               (wav_size),
+    .sd_sec_read            (aud_sd_sec_read),
+    .sd_sec_read_addr       (aud_sd_sec_read_addr),
+    .sd_sec_read_data       (sd_sec_read_data),
+    .sd_sec_read_data_valid (sd_sec_read_data_valid),
+    .sd_sec_read_end        (sd_sec_read_end),
+    .fifo_we                (aud_fifo_we),
+    .fifo_di                (aud_fifo_di),
+    .fifo_wrusedw           (aud_fifo_wrusedw)
 );
 
 sd_card_top sd_card_top_m0(

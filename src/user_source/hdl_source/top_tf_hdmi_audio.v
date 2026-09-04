@@ -128,6 +128,17 @@ wire        acr_valid;
 wire [19:0] acr_cts;
 wire [19:0] acr_n;
 
+// Music playback CDC. sd_audio_stream (inside sd_card_bmp, sd_card_clk domain)
+// writes {R,L} stereo frames into the async FIFO; audio_pcm_player (video_clk
+// domain) reads them at 48 kHz. wrusedw is the streamer's sector-boundary
+// backpressure, rdusedw tells the pacer whether the show-ahead head is live.
+wire        aud_fifo_we;
+wire [31:0] aud_fifo_di;
+wire [8:0]  aud_fifo_wrusedw;
+wire        aud_fifo_re;
+wire [31:0] aud_fifo_dout;
+wire [8:0]  aud_fifo_rdusedw;
+
 wire        axis_s_user;
 wire        axis_s_valid;
 wire        axis_s_last;
@@ -258,6 +269,9 @@ sd_card_bmp #(
     .write_en          (sd_card_write_en),
     .write_data        (sd_card_write_data),
     .write_fifo_usedw  (sd_card_write_fifo_usedw),
+    .aud_fifo_we       (aud_fifo_we),
+    .aud_fifo_di       (aud_fifo_di),
+    .aud_fifo_wrusedw  (aud_fifo_wrusedw),
     .SD_nCS            (sd_ncs),
     .SD_DCLK           (sd_dclk),
     .SD_MOSI           (sd_mosi),
@@ -447,26 +461,44 @@ sdram U3(
     .Sdr_rd_dout       (Sdr_rd_dout)
 );
 
-// ===================== 音频：内部 I2S 测试音 =====================
-// AMP is deliberately not overridden here: tools/sim_tone_gen.py parses it out
-// of the module, and an override at this level would let the model verify a
-// value the hardware never uses.
-hdmi_audio_tone_i2s_64fs #(
-    .PHASE_INC (32'd39370534)
-) u_hdmi_audio_tone_i2s_64fs (
-    .I_mclk      (audio_mclk),
-    .I_rst       (rst_all),
-    .O_i2s_BCLK  (audio_i2s_bclk),
-    .O_i2s_LRCK  (audio_i2s_lrck),
-    .O_i2s_DOUT  (audio_i2s_dout)
+// ===================== 音频：TF 卡 WAV 流式播放 =====================
+// sd_audio_stream (inside sd_card_bmp, sd_card_clk domain) streams PCM frames
+// off the card into this async FIFO, which crosses them into video_clk. The
+// pacer below emits the continuous 48 kHz valid/sample stream the HDMI audio
+// core and audio_arc_calculate need -- including silence on underrun, so the
+// ACR reference never gaps.
+//
+// The old synthetic-tone path (hdmi_audio_tone_i2s_64fs + I2S_receiver) is
+// removed from the build; both module files stay in the repo so the tone can be
+// re-hung for debugging. audio_mclk is still driven by PLL_HDMI_AUDIO (kept
+// because rst_all gates on audio_pll_lock -- the reset tree is unchanged) but
+// is now unused; audio_i2s_* are unused dangling wires.
+wfifo_32_32_512 u_audio_fifo (
+    .rst        (rst_all),
+    .clkw       (sd_card_clk),
+    .clkr       (video_clk),
+    .we         (aud_fifo_we),
+    .di         (aud_fifo_di),
+    .re         (aud_fifo_re),
+    .dout       (aud_fifo_dout),
+    .valid      (),
+    .full_flag  (),
+    .empty_flag (),
+    .afull      (),
+    .aempty     (),
+    .wrusedw    (aud_fifo_wrusedw),
+    .rdusedw    (aud_fifo_rdusedw)
 );
 
-I2S_receiver u_I2S_receiver(
+audio_pcm_player #(
+    .CLK_FREQ_HZ    (25_000_000),
+    .SAMPLE_RATE_HZ (48_000)
+) u_audio_pcm_player (
     .I_clk              (video_clk),
     .I_rst              (rst_all),
-    .I_i2s_BCLK         (audio_i2s_bclk),
-    .I_i2s_LRCK         (audio_i2s_lrck),
-    .I_i2s_DOUT         (audio_i2s_dout),
+    .fifo_re            (aud_fifo_re),
+    .fifo_dout          (aud_fifo_dout),
+    .fifo_rdusedw       (aud_fifo_rdusedw),
     .O_audio_valid      (audio_valid),
     .O_audio_left_data  (audio_left_data),
     .O_audio_right_data (audio_right_data)

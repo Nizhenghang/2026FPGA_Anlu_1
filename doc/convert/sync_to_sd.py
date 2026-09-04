@@ -4,6 +4,9 @@ import glob
 import shutil
 import argparse
 
+# 让本脚本无论从哪运行都能 import 同目录的 convert_audio_to_wav
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 def corrupt_old_bmp_headers(target_drive):
     """
     遍历目标驱动器下的所有 .bmp 文件，将其开头的 'BM' 魔数修改为 'XX'。
@@ -91,11 +94,44 @@ def sync_new_images(source_dir, target_drive, max_count=4):
     print(f"\n同步完成！成功写入 {success_count} 张新图片。")
     print("你现在可以安全弹出 SD 卡，插入 FPGA 开发板了。")
 
+def sync_audio(audio_path, target_drive):
+    """
+    把音频（如 MP3）离线转成标准 WAV，写到目标盘根目录 MUSIC.WAV。
+
+    必须在写 BMP 之前调用，原因有两条，缺一不可：
+      1) 目录顺序：FAT32 根目录项按创建先后排列。bmp_read 的扫描找满 4 张 BMP
+         就提前 scan_done 停止，所以 WAV 的目录项必须排在那 4 张 BMP 之前才会被
+         扫到。先写 MUSIC.WAV -> 它占用第一个空闲目录槽。
+      2) 物理连续：读卡不跟 FAT32 簇链（地址线性 +1），假设文件物理连续。空卡
+         上先写这个大文件，FAT 基本为空 -> 一次性连续分配，规避碎片。
+    为最大化第 2 点的可靠性，建议先对卡做一次 FAT32 格式化再运行本工具。
+    """
+    import convert_audio_to_wav as cw
+
+    if not os.path.isfile(audio_path):
+        print(f"\n[错误] 找不到音频文件: {audio_path}")
+        return None
+
+    out = os.path.join(target_drive, "MUSIC.WAV")
+    print(f"\n正在把音频转为标准 WAV 并【先于 BMP】写入...")
+    print(f"  输入: {audio_path}")
+    print(f"  目标: {out}")
+    try:
+        pcm_len, total_len, seconds = cw.convert_mp3_to_wav(audio_path, out)
+    except Exception as e:
+        print(f"  [音频失败] {e}")
+        return None
+    mm, ss = divmod(int(seconds), 60)
+    print(f"  [音频成功] 时长 {mm:02d}:{ss:02d}  PCM {pcm_len} 字节  文件 {total_len} 字节")
+    print(f"  FPGA 校验: PCM 长度 = 文件字节-44 = {total_len - cw.WAV_HEADER_LEN}")
+    return out
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FPGA SD卡 图片同步工具 (防物理残留死锁版)")
     parser.add_argument('drive', help='SD 卡所在的盘符 (例如: E: 或 E:\\)')
     parser.add_argument('-s', '--source', help='存放转换好 BMP 图片的源文件夹 (默认: 当前目录的 output_bmp)', default=None)
     parser.add_argument('-n', '--num', type=int, default=4, help='最多同步的图片数量 (默认: 4)')
+    parser.add_argument('-a', '--audio', help='要播放的音频文件 (如 MP3)。提供则离线转成 MUSIC.WAV 并【先于 BMP】写入卡根目录', default=None)
     
     args = parser.parse_args()
 
@@ -134,5 +170,9 @@ if __name__ == "__main__":
     # 步骤 2: 清空 SD 卡（从文件系统层面）
     clean_drive(target_drive)
     
-    # 步骤 3: 复制新图片
+    # 步骤 3: 若指定了音频，先写 MUSIC.WAV（必须早于 BMP：目录项排序 + 物理连续）
+    if args.audio:
+        sync_audio(args.audio, target_drive)
+
+    # 步骤 4: 复制新图片
     sync_new_images(source_dir, target_drive, max_count=args.num)
