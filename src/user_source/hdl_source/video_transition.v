@@ -28,9 +28,11 @@
 //   selectors are made equal again once the boundary has had time to saturate,
 //   and that equality is also what resets the boundary for the next wipe.
 //
-//   The two effects alternate, one per picture change, so a carousel of four
-//   pictures shows both of them within a single pass. mode_wipe resets to 0,
-//   which makes the first transition a fade.
+//   By default (I_mode=00, auto) the two effects alternate, one per picture
+//   change, so a carousel of four pictures shows both of them within a single
+//   pass. mode_wipe resets to 0, which makes the first transition a fade.
+//   I_mode can instead pin the choice to fade only (01) or wipe only (10); see
+//   the use_wipe wire below. mode=11 is reserved and behaves as auto.
 //
 // Frame alignment, and why the swap lands where it does
 //   video_timing_data raises read_req on the vsync edge, and I_frame_start here
@@ -84,6 +86,7 @@ module video_transition #(
     input  wire        I_frame_start,       // one pulse per frame, see the alignment note above
     input  wire        I_display_valid,     // at least one picture has been committed
     input  wire [1:0]  I_disp_idx,          // the picture sd_card_bmp wants shown, synchronised
+    input  wire [1:0]  I_mode,              // transition select, quasi static from DIP switches: 00 auto alternate, 01 fade only, 10 wipe only, 11 reserved (auto)
 
     output reg  [1:0]  O_bot_idx,           // frame_fifo_read read_addr_index     : boundary line and below
     output reg  [1:0]  O_top_idx,           // frame_fifo_read read_addr_index_top : above the boundary
@@ -106,6 +109,15 @@ reg       dv_d;
 
 wire dv_rise = I_display_valid && !dv_d;
 wire pending = (I_disp_idx != cur_idx);
+
+// Effect select for the transition that is about to start. Forced modes pin the
+// choice; auto (00) and reserved (11) fall through to the free running
+// alternator so a carousel still shows both effects. Sampled combinationally at
+// the ST_IDLE/pending branch below, i.e. once per transition, so a mid-flight
+// DIP change cannot tear a transition already in progress.
+wire use_wipe = (I_mode == 2'b01) ? 1'b0 :
+                (I_mode == 2'b10) ? 1'b1 :
+                mode_wipe;
 
 always @(posedge I_clk or posedge I_rst) begin
     if (I_rst) begin
@@ -146,7 +158,7 @@ always @(posedge I_clk or posedge I_rst) begin
                         tgt_idx   <= I_disp_idx;
                         hold_cnt  <= 6'd0;
                         mode_wipe <= ~mode_wipe;
-                        if (mode_wipe) begin
+                        if (use_wipe) begin
                             // Only the top selector moves. frame_fifo_read
                             // takes the disagreement as "start a wipe" and
                             // ramps its boundary from the top of the panel.

@@ -69,7 +69,7 @@ FPGA 不在片内解码 MP3——与图片管线一致（图片离线转无压�
 
 - **淡出淡入**：按视频帧递减到全黑（默认 8 帧），在黑屏那一帧交接缓冲区索引，再递增 8 帧。只有一帧全黑，看不到硬切。
 - **垂直擦除**：上半屏选择器先指向目标图、下半屏保持原图，`frame_fifo_read` 每帧把分界线向下推进 8 个两行组，从面板顶部逐次揭示新图；240 / 8 = 30 帧走完，选择器保持分离 40 帧后再合并。
-- 两种效果每次换图交替使用，所以四张图轮播一遍就能看到两种转场。`mode_wipe` 复位为 0，第一次转场是淡入淡出。
+- **默认（自动模式）**两种效果每次换图交替使用，所以四张图轮播一遍就能看到两种转场。`mode_wipe` 复位为 0，第一次转场是淡入淡出。也可用拨码开关固定为只用其中一种，见第 6 节。
 - 擦除期间同一帧要读两个缓冲区，这之所以安全，是因为四张图早已全部载入、此后没有任何写入者。
 
 ### 4. SDRAM 帧缓存与多缓冲
@@ -87,11 +87,20 @@ FPGA 不在片内解码 MP3——与图片管线一致（图片离线转无压�
 - `PLL_HDMI_AUDIO` 仍保留（复位树依赖其 lock），但 12.288 MHz 音频主时钟与 `hdmi_audio_tone_i2s_64fs.v` / `I2S_receiver.v` 已不再例化，文件保留在仓库便于调试回挂。
 - 上电后自动触发 EDID 读取。
 
-### 6. 按键交互与 OSD
+### 6. 按键、拨码交互与 OSD
 
 - `key1`：手动切换到下一张已载入的图片。
 - `key2`：开启 / 关闭自动轮播（间隔 1 秒，需已载入 2 张以上）。
 - `key3`：循环调节亮度档位 `B0` ~ `B4`，默认 `B2`。
+- 拨码开关 `sw[3:0]`（`SW1`~`SW4` = `C8`/`C7`/`C6`/`C5`，`PULLUP` 输入）：用 `SW1`/`SW2` 选择转场特效。拨码为低有效（ON 接地 = 0），RTL 同步后取反成 ON=1 的直观逻辑；模式在每次转场**开始时**采样，拨动后从**下一张图**生效，不会打断进行中的转场。`SW3`/`SW4` 已约束但预留未用。
+
+  | SW2 | SW1 | 模式 | 行为 |
+  |---|---|---|---|
+  | OFF | OFF | 自动 | 淡入淡出 / 垂直擦除交替（默认，等同上电行为） |
+  | OFF | ON  | 只淡入淡出 | 每次换图都用淡出淡入 |
+  | ON  | OFF | 只垂直擦除 | 每次换图都用自上而下擦除 |
+  | ON  | ON  | 预留 | 暂等同自动 |
+
 - `osd_overlay.v` 在画面左上角叠加展示型面板：`ANLOGIC MEDIA 26` 标题、`IMG:n` 图片编号、自动 / 手动模式、亮度进度条、SD 状态码和 HDMI AUDIO 标识，并带边框、顶栏和闪烁运行点。内置 8x8 点阵字模，不占用外部 ROM。
 - 数码管同步显示 SD 卡状态码，便于调试初始化、扫描和读取流程。
 - OSD 叠加位于视频转 AXI-Stream 之前，不影响 TF 卡读取、帧缓存和发射核结构。
@@ -159,17 +168,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/td_build.ps1 -Stage al
 
 ### 时序与资源（最近一次构建实测）
 
-Slow / Fast 两个 corner 全部收敛，违例端点 0，全局 Setup WNS +0.712 ns、Hold WNS +0.003 ns。
+Slow / Fast 两个 corner 全部收敛，违例端点 0，全局 Setup WNS +0.499 ns、Hold WNS +0.004 ns。
 
 | 时钟 | 约束 | 实测 fmax | SWNS |
 |---|---|---|---|
-| `sd_card_clk` | 100 MHz | 108.225 MHz | +0.760 ns |
-| `ext_mem_clk` | 125 MHz | 137.212 MHz | +0.712 ns |
-| `video_clk` | 25 MHz | 32.670 MHz | +3.792 ns |
-| `clk` | 50 MHz | 81.739 MHz | +3.883 ns |
-| `hdmi_5x_clk` | 125 MHz | 307.220 MHz | +4.745 ns |
+| `sd_card_clk` | 100 MHz | 105.252 MHz | +0.499 ns |
+| `ext_mem_clk` | 125 MHz | 156.104 MHz | +0.725 ns |
+| `video_clk` | 25 MHz | 37.692 MHz | +13.469 ns |
+| `clk` | 50 MHz | 64.309 MHz | +2.225 ns |
+| `hdmi_5x_clk` | 125 MHz | 322.373 MHz | +4.898 ns |
 
-余量最紧的是 `sd_card_clk`（8.2%），图片级重试逻辑正好在这个域。资源占用 5059 slices（51.62%）、34 个 RAM、0 个 DSP。
+余量最紧的是 `sd_card_clk`（5.25%）：音频流式读取（`sd_audio_stream`）与图片级重试逻辑都在这个域。拨码转场模式选择只在 `video_clk` 域增加 2 位同步寄存器与一个选择器，`video_clk` 余量极大（fmax 37.7 MHz vs 25 MHz 约束），对紧路径无影响。资源占用 6109 slices（62.34%）、36 个 RAM、2 个 DSP。
 
 `timing.sdc` 中对 SDRAM 硬核 DQ 边界写了 `set_max_delay -datapath_only` 例外：这些路径全在加密 IP 内部、fabric 与 PHY 之间没有用户逻辑，安路也未随该 IP 附带 `.tcl` 约束，不做例外时它们贡献总 TNS 的 87% 伪违例。
 
@@ -182,7 +191,7 @@ Slow / Fast 两个 corner 全部收敛，违例端点 0，全局 Setup WNS +0.71
 | `sim_load_retry.py` | 图片加载调度器 + 最小 `bmp_read`。含负对照：同一次瞬时失败跑改动前的调度器，复现"卡里四张、只显示三张"的原始现象 |
 | `sim_scaler_nn.py` | 缩放器时序与弹性缓冲峰值占用 |
 | `sim_dir_scan.py` | 按字节重放根目录扫描，直读 TF 卡，证明扫描器确实记录到全部 BMP |
-| `sim_sd_retry.py` / `sim_transition.py` | 扇区级重试、转场状态机 |
+| `sim_sd_retry.py` / `sim_transition.py` | 扇区级重试、转场状态机（含拨码 `I_mode` 模式选择与负对照） |
 | `cmp_bit.py` | 比较两个比特流的配置体。ASCII 头带分钟级 `# Date:`，所以未改动设计的重编也不是逐字节相同，整文件哈希比较必然误报 |
 | `td_build.ps1` / `td_flow_exit.tcl` | 无头构建 |
 | `gen_test_bmp.py` / `check_sd_card.py` / `probe_retry_trace.py` / `render_defect_preview.py` | 测试图生成与卡上诊断 |
@@ -198,7 +207,7 @@ Slow / Fast 两个 corner 全部收敛，违例端点 0，全局 Setup WNS +0.71
 3. 插入 TF 卡，HDMI 线接到开发板 HDMI_B。
 4. 用 Anlogic TD 打开 `src/td_project/HDMI1.4b_Transmitter_v1.0.al`，综合、布局布线并下载；仓库里 `best_result/` 的比特流是最近一次 GUI 构建的产物，未改 RTL 时可以直接烧。若用无头脚本重新构建过，按「构建与烧录」一节的路径规则选择比特流。
 5. 首图加载完成后显示器应出现图片，数码管状态码停止变化；约 7 秒后四张图全部载入。
-6. `key1` 手动切换，`key2` 开关自动轮播，`key3` 调节亮度。切换时应交替看到淡入淡出和自上而下的擦除效果。
+6. `key1` 手动切换，`key2` 开关自动轮播，`key3` 调节亮度。默认（`SW1`/`SW2` 都 OFF）切换时应交替看到淡入淡出和自上而下的擦除效果；拨 `SW1` ON 固定为只淡入淡出、`SW2` ON 固定为只垂直擦除（下一张图生效）。
 
 ## 后续实现方向
 
@@ -241,7 +250,7 @@ Slow / Fast 两个 corner 全部收敛，违例端点 0，全局 Setup WNS +0.71
 - `SD/sd_card_sec_read_write.v`：扇区级 SPI 读，含起始令牌重试。
 - `SD/frame_fifo_write.v` / `SD/frame_fifo_read.v` / `SD/frame_read_write.v`：SDRAM 帧缓存读写与擦除分界线推进。
 - `SD/video_timing_data.v`：640 x 480 视频时序生成。
-- `video_transition.v`：淡入淡出与垂直擦除两种交替转场，决定面板何时看到缓冲区切换。
+- `video_transition.v`：淡入淡出与垂直擦除两种转场，决定面板何时看到缓冲区切换；默认自动交替，可由 `I_mode`（拨码）固定为只用某一种。
 - `video_brightness.v`：RGB 三通道亮度档位调节。
 - `video_fade.v`：按转场给出的电平做比例缩放。
 - `audio_visualizer.v`：底部波形、频谱柱和峰值显示叠加。

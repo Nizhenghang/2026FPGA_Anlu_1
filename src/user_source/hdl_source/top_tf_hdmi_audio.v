@@ -5,6 +5,7 @@ module top(
     input                       key1,           // 手动下一张
     input                       key2,           // 自动播放 开/关
     input                       key3,           // 亮度档位循环
+    input       [3:0]           sw,             // 拨码开关：sw[1:0] 选转场特效，sw[3:2] 预留
 
     output [5:0]                seg_sel,
     output [7:0]                seg_data,
@@ -68,6 +69,9 @@ wire [1:0]  trans_bot_idx;
 wire [1:0]  trans_top_idx;
 wire [1:0]  trans_img_idx;
 wire [3:0]  trans_fade_level;
+// DIP switches are active low (ON connects the pin to GND), so invert the
+// synchronized value to get an intuitive ON=1 mode. 00 auto, 01 fade, 10 wipe.
+wire [1:0]  trans_mode = ~sw_v1;
 
 wire [3:0]  state_code;
 wire [6:0]  seg_data_0;
@@ -100,6 +104,8 @@ reg         display_valid_v1;
 reg  [2:0]  brightness_level;
 reg  [2:0]  brightness_level_v0;
 reg  [2:0]  brightness_level_v1;
+reg  [1:0]  sw_v0;
+reg  [1:0]  sw_v1;
 reg         vs_d;
 
 wire App_rd_en;
@@ -229,6 +235,8 @@ always @(posedge video_clk or posedge rst_all) begin
         display_valid_v1 <= 1'b0;
         brightness_level_v0 <= 3'd2;
         brightness_level_v1 <= 3'd2;
+        sw_v0 <= 2'b11;                     // ~2'b11 = 2'b00 = AUTO out of reset
+        sw_v1 <= 2'b11;
         vs_d <= 1'b0;
     end else begin
         disp_buf_idx_v0  <= disp_buf_idx;
@@ -241,6 +249,8 @@ always @(posedge video_clk or posedge rst_all) begin
         display_valid_v1 <= display_valid_v0;
         brightness_level_v0 <= brightness_level;
         brightness_level_v1 <= brightness_level_v0;
+        sw_v0 <= sw[1:0];                   // synchronize raw active-low pins
+        sw_v1 <= sw_v0;
         vs_d <= vs;
     end
 end
@@ -350,6 +360,7 @@ video_transition #(
     .I_frame_start   (video_frame_start),
     .I_display_valid (display_valid_v1),
     .I_disp_idx      (disp_buf_idx_v1),
+    .I_mode          (trans_mode),
     .O_bot_idx       (trans_bot_idx),
     .O_top_idx       (trans_top_idx),
     .O_img_idx       (trans_img_idx),

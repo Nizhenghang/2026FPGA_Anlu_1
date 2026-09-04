@@ -344,7 +344,7 @@ class VideoTransition(object):
         self.img_idx = 0
         self.fade_level = 0
 
-    def tick(self, display_valid, disp_idx, frame_start):
+    def tick(self, display_valid, disp_idx, frame_start, mode=0):
         dv_rise = 1 if (display_valid and not self.dv_d) else 0
         pending = 1 if disp_idx != self.cur_idx else 0
         self.dv_d = display_valid          # dv_d <= I_display_valid, unconditional
@@ -369,12 +369,21 @@ class VideoTransition(object):
                 if pending:
                     self.tgt_idx = disp_idx
                     self.hold_cnt = 0
-                    if self.mode_wipe:
+                    # use_wipe mirrors the RTL wire: forced modes pin the choice,
+                    # auto (00) and reserved (11) fall through to the alternator.
+                    # It reads the OLD mode_wipe, matching non-blocking semantics.
+                    if mode == 0b01:
+                        use_wipe = 0
+                    elif mode == 0b10:
+                        use_wipe = 1
+                    else:
+                        use_wipe = self.mode_wipe
+                    if use_wipe:
                         self.top_idx = disp_idx
                         self.state = ST_WIPE
                     else:
                         self.state = ST_FADE_OUT
-                    self.mode_wipe ^= 1
+                    self.mode_wipe ^= 1     # alternator keeps running in every mode
             elif s == ST_FADE_OUT:
                 if self.fade_level <= 1:
                     self.fade_level = 0
@@ -1083,6 +1092,112 @@ def pass_e():
     print("  Pass E done")
 
 
+def _drive_transition(t, new_idx, mode):
+    """Advance the controller to new_idx and run one full transition.
+
+    Assumes t is in ST_IDLE with display_valid already asserted and dv_d=1, so
+    no dv_rise re-init fires. Ticks one frame at a time (frame_start=1), records
+    which effect the controller committed to when it left ST_IDLE, then keeps
+    ticking until it settles back in ST_IDLE having reached new_idx. Returns
+    'fade', 'wipe', or None if it never committed (caller treats None as a fail).
+    """
+    effect = None
+    guard = 4 * (t.FADE_MAX + t.WIPE_HOLD + t.WIPE_SETTLE) + 64
+    for _ in range(guard):
+        st_before = t.state
+        t.tick(1, new_idx, 1, mode=mode)
+        if st_before == ST_IDLE and t.state == ST_FADE_OUT:
+            effect = 'fade'
+        elif st_before == ST_IDLE and t.state == ST_WIPE:
+            effect = 'wipe'
+        if effect is not None and t.state == ST_IDLE and t.cur_idx == new_idx:
+            return effect
+    return effect
+
+
+def _effect_sequence(mode, n_transitions, cls=VideoTransition):
+    """Return the list of effects ('fade'/'wipe') for n picture changes under a
+    fixed I_mode. Small counters keep it fast; the effect choice is decided once
+    per transition and is independent of FADE_MAX/WIPE_HOLD/WIPE_SETTLE."""
+    t = cls(fade_max=3, wipe_hold=6, wipe_settle=2)
+    for _ in range(3):
+        t.tick(0, 0, 0, mode=mode)          # display_valid low, dv_d clears
+    t.tick(1, 0, 1, mode=mode)              # dv_rise commits idx 0 -> ST_FADE_IN
+    for _ in range(8):
+        t.tick(1, 0, 1, mode=mode)          # let the initial fade-in reach ST_IDLE
+    if t.state != ST_IDLE or t.cur_idx != 0:
+        return None
+    seq = []
+    idx = 0
+    for _ in range(n_transitions):
+        idx = (idx + 1) % 4
+        eff = _drive_transition(t, idx, mode)
+        if eff is None:
+            return None
+        seq.append(eff)
+    return seq
+
+
+class _BrokenVideoTransition(VideoTransition):
+    """Negative control: use_wipe with the two forced-mode codes swapped, i.e.
+    exactly the mis-wiring where 01 drives wipe and 10 drives fade."""
+
+    def tick(self, display_valid, disp_idx, frame_start, mode=0):
+        swapped = {0b01: 0b10, 0b10: 0b01}.get(mode, mode)
+        return VideoTransition.tick(self, display_valid, disp_idx, frame_start,
+                                    mode=swapped)
+
+
+def pass_f():
+    print("Pass F  DIP I_mode selects the transition effect")
+    N = 6
+    auto = _effect_sequence(0b00, N)
+    fade = _effect_sequence(0b01, N)
+    wipe = _effect_sequence(0b10, N)
+    resv = _effect_sequence(0b11, N)
+    if None in (auto, fade, wipe, resv):
+        fail("a mode never settled into a clean transition sequence: "
+             "auto=%s fade=%s wipe=%s resv=%s" % (auto, fade, wipe, resv))
+        print("  Pass F done")
+        return
+
+    exp_auto = ['fade' if i % 2 == 0 else 'wipe' for i in range(N)]
+    exp_fade = ['fade'] * N
+    exp_wipe = ['wipe'] * N
+    exp_resv = exp_auto
+
+    if auto == exp_auto:
+        ok("mode 00 (auto) alternates from fade: " + ",".join(auto))
+    else:
+        fail("mode 00 expected %s got %s" % (exp_auto, auto))
+    if fade == exp_fade:
+        ok("mode 01 (fade only) is all fade: " + ",".join(fade))
+    else:
+        fail("mode 01 expected %s got %s" % (exp_fade, fade))
+    if wipe == exp_wipe:
+        ok("mode 10 (wipe only) is all wipe: " + ",".join(wipe))
+    else:
+        fail("mode 10 expected %s got %s" % (exp_wipe, wipe))
+    if resv == exp_resv:
+        ok("mode 11 (reserved) falls through to auto: " + ",".join(resv))
+    else:
+        fail("mode 11 expected %s got %s" % (exp_resv, resv))
+
+    # Negative control: inject the swapped-mapping bug and confirm the fade-only
+    # signature changes, proving the checks above can actually fail rather than
+    # passing for any old mapping.
+    broken = _effect_sequence(0b01, N, cls=_BrokenVideoTransition)
+    if broken == exp_fade:
+        fail("negative control is toothless: a swapped fade/wipe mapping still "
+             "produced the fade-only signature")
+    elif broken is None:
+        fail("negative control did not run")
+    else:
+        ok("negative control: swapping the forced-mode codes turns mode 01 into "
+           "%s, which the fade-only check rejects" % ",".join(broken))
+    print("  Pass F done")
+
+
 def main():
     print("stage 4 transition reference model")
     print("=" * 72)
@@ -1095,6 +1210,8 @@ def main():
     pass_c()
     print()
     pass_d()
+    print()
+    pass_f()
     print()
     print("=" * 72)
     if failures:
