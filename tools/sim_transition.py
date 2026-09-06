@@ -8,11 +8,19 @@ this script models both and, more importantly, models the coupling between
 them, which is where a mistake would actually hide.
 
   video_transition.v   video_clk, one decision per frame. Chooses the two
-                       buffer selectors and the fade level.
+                       buffer selectors, the 3-bit effect code and the fade
+                       level. I_mode 000 auto-cycles the six band effects plus
+                       fade, 001..110 force one effect, 111 forces fade.
   frame_fifo_read.v    ext_mem_clk, one burst at a time. Turns the two
-                       selectors into read base addresses, and during a wipe
-                       redirects the address once per frame at a boundary that
-                       is an exact multiple of two lines.
+                       selectors plus the effect code into read base addresses.
+                       During a band effect it consults
+                       select_top(group, progress, effect) at every two-line
+                       group boundary and redirects the address by +/- the
+                       buffer delta whenever the selection flips, so a whole
+                       family of vertical sweeps (wipe down/up, blinds, split,
+                       random bars, comb) shares the one proven redirect
+                       mechanism. effect=1 reproduces the original single
+                       crossing wipe bit for bit.
 
 Passes
   A  controller sequencing, frame granularity.
@@ -21,12 +29,20 @@ Passes
      observable register is compared every cycle. This is the guard on the one
      change that touches a module already verified on hardware.
   C  frame_fifo_read at the real geometry, one frame per selected boundary
-     position, checking the buffer attribution of every single word.
+     position, checking the buffer attribution of every single word (effect=1,
+     the legacy single crossing wipe).
   D  coupled run: the controller drives the selectors that the read model
      consumes, at a scaled down geometry so that hundreds of frames are cheap,
-     verifying what the panel would actually show.
+     verifying what the panel would actually show. Forced to wipe-down so it
+     stays the hardware-verified single-boundary regression.
   E  parameter consistency, read back out of the RTL sources so the check
      cannot drift away from what is actually instantiated.
+  F  DIP I_mode (3 bit) selects which effect the controller commits to: the
+     auto-cycle rotation, one of the six forced band effects, or fade.
+  G  band effect geometry: every effect across the whole ramp, checking the
+     select_top pattern, full coverage at saturation, word-by-word buffer
+     attribution through the FSM, and that redirects only ever fire on a group
+     boundary. Carries a negative control on the saturation guard.
 
 Exit code is 0 only if every gated check passed.
 """
@@ -54,14 +70,22 @@ class FrameFifoRead(object):
     """One mem_clk cycle per step(), non blocking assignment semantics.
 
     wipe=False reproduces the module exactly as it was before stage 4.
-    wipe=True adds read_addr_index_top plus the group aligned redirect. When
-    the two selectors are driven equal the streams must be identical, and that
-    equivalence is what Pass B hammers on.
+    wipe=True adds read_addr_index_top plus the group aligned redirect, now
+    generalized from ONE crossing to a programmable per group buffer selection
+    driven by `effect`. select_top(g, progress, effect) decides, for each two
+    line group g, whether that group reads from the top buffer (1) or the bottom
+    buffer (0); the address is redirected by +/- wipe_delta at every group
+    boundary where the selection flips, which preserves the intra frame word
+    offset exactly as the single crossing did. effect=1 (wipe down) reproduces
+    the original single crossing wipe bit for bit, which is what Pass C and
+    Pass D still rely on. When the two selectors are driven equal the band
+    engine is inert (progress=g=cur_sel=next_sel_r=deltas all stay zero) and the
+    stream is identical to wipe=False; that equivalence is what Pass B hammers.
     """
 
     def __init__(self, read_addrs, read_len, burst_size=256, addr_bits=21,
                  burst_bits=9, fifo_depth=512, wipe=False,
-                 wipe_grp_max=240, wipe_grp_step=8):
+                 wipe_grp_max=240, wipe_grp_step=8, effect=1):
         self.read_addrs = tuple(read_addrs)
         self.read_len = read_len
         self.BURST_SIZE = burst_size
@@ -71,11 +95,44 @@ class FrameFifoRead(object):
         self.wipe = wipe
         self.WIPE_GRP_MAX = wipe_grp_max
         self.WIPE_GRP_STEP = wipe_grp_step
+        # band geometry code, 1..6; 0 and 7 mean "no band redirect" and are
+        # never passed to select_top. effect=1 is the legacy wipe down.
+        self.effect = effect
         # word offset within the frame at which the address was redirected,
         # recorded for reporting; -1 means no redirect happened this frame
         self.last_cross_word = -1
         self.words_this_frame = 0
         self.reset()
+
+    # -- band geometry: which buffer group g reads from ----------------------
+    # Pure function of the group index, the per frame progress and the effect
+    # code. Mirrors the select_top() Verilog function exactly, including the
+    # progress >= grp_max saturation guard that reveals the last row of blinds
+    # and the outermost group of split. Effects 1 and 2 scale with grp_max so
+    # they also run at the reduced coupled geometry; effects 3..6 hardcode the
+    # real 240 group panel constants (16 group slats, centre 120, bitrev8).
+    @staticmethod
+    def select_top(g, progress, eff, grp_max=240):
+        if eff == 1:                                  # wipe down
+            return 1 if g < progress else 0
+        if eff == 2:                                  # wipe up
+            return 1 if g >= (grp_max - progress) else 0
+        if eff == 3:                                  # blinds, 15 slats of 16
+            thresh = progress >> 4
+            return 1 if ((g & 0xF) < thresh or progress >= grp_max) else 0
+        if eff == 4:                                  # split from the centre
+            half = grp_max >> 1
+            diff = (g - half) if g > half else (half - g)
+            return 1 if (diff < (progress >> 1) or progress >= grp_max) else 0
+        if eff == 5:                                  # random bars, bitrev8
+            rank = int(format(g & 0xFF, '08b')[::-1], 2)
+            scaled = progress + (progress >> 3)
+            return 1 if (rank < scaled or progress >= grp_max) else 0
+        if eff == 6:                                  # comb, odd/even reversed
+            if g & 1:
+                return 1 if g >= (grp_max - progress) else 0
+            return 1 if g < progress else 0
+        return 0
 
     def reset(self):
         self.read_req_d0 = 0
@@ -90,6 +147,8 @@ class FrameFifoRead(object):
         self.idx_d1 = 0
         self.idx_top_d0 = 0
         self.idx_top_d1 = 0
+        self.effect_d0 = 0
+        self.effect_d1 = 0
         self.app_rd_addr_r = 0
         self.burst_cnt = 0
         self.rd_delay = 0
@@ -97,18 +156,22 @@ class FrameFifoRead(object):
         self.app_rd_en_d0 = 0
         self.fifo_aclr = 0
         self.read_req_ack = 0
-        self.wipe_pos = 0
-        self.grp_to_cross = 0
+        self.progress = 0
+        self.g = 0
+        self.g_plus1 = 1
+        self.cur_sel = 0
+        self.next_sel_r = 0
         self.burst_in_grp = 0
         self.wipe_delta = 0
+        self.neg_wipe_delta = 0
         # Per frame recorders, not RTL registers. frame_grp / frame_top /
-        # frame_bot are snapshotted at s_ack_first, so they say what the frame
-        # about to be read is actually read with. grp_to_cross has counted down
-        # to nothing by the time the frame ends, so reading it afterwards would
-        # report the wrong boundary.
+        # frame_bot / frame_effect are snapshotted at s_ack_first, so they say
+        # what the frame about to be read is actually read with.
         self.frame_grp = 0
         self.frame_top = 0
         self.frame_bot = 0
+        self.frame_effect = 0
+        self.cross_words = []
         self.last_cross_word = -1
         self.words_this_frame = 0
         self._words_seen = 0
@@ -123,25 +186,58 @@ class FrameFifoRead(object):
         if self.wipe:
             base_top = self.read_addrs[self.idx_top_d1]
             sel_diff = 1 if self.idx_top_d1 != self.idx_d1 else 0
-            start_base = base_top if sel_diff else base_bot
+            eff = self.effect_d1
             s_ack_first = 1 if (self.state == S_ACK
                                 and self.read_req_ack == 0) else 0
-            grp_cross = 1 if (rd_burst_finish and self.burst_in_grp == 4
-                              and self.grp_to_cross == 1) else 0
             # saturating one step of the ramp, mirrors wipe_pos_next
-            if self.wipe_pos >= (self.WIPE_GRP_MAX - self.WIPE_GRP_STEP):
+            if self.progress >= (self.WIPE_GRP_MAX - self.WIPE_GRP_STEP):
                 pos_next = self.WIPE_GRP_MAX
             else:
-                pos_next = self.wipe_pos + self.WIPE_GRP_STEP
+                pos_next = self.progress + self.WIPE_GRP_STEP
+            # the first group's buffer for this frame. first_sel is computed from
+            # pos_next (the value progress freezes to on the s_ack_first cycle)
+            # and is what cur_sel latches there. The start base, however, is
+            # derived from the REGISTERED cur_sel on every S_ACK cycle rather than
+            # from first_sel directly, so select_top never enters the 21 bit
+            # ext_mem_clk address register D path. That is safe: S_ACK lasts
+            # several cycles and reloads the address on each one, cur_sel already
+            # holds first_sel from the second cycle onward, and App_rd_en is low
+            # throughout S_ACK, so the single stale load on the s_ack_first cycle
+            # is never emitted. The first word read in S_READ_BURST therefore sees
+            # the correct group-0 base. Recomputing from pos_next here would also
+            # be wrong on the later S_ACK cycles, because progress has frozen and
+            # pos_next has stepped on to the next frame's ramp value.
+            first_sel = (self.select_top(0, pos_next, eff, self.WIPE_GRP_MAX)
+                         if sel_diff else 0)
+            start_sel = self.cur_sel
+            start_base = base_top if start_sel else base_bot
+            grp_boundary = 1 if (rd_burst_finish
+                                 and self.burst_in_grp == 4) else 0
+            # the redirect decision reads the REGISTERED next_sel_r, so the
+            # select_top combinational depth never enters the address path
+            do_redirect = 1 if (sel_diff and grp_boundary
+                                and self.next_sel_r != self.cur_sel) else 0
+            # g_plus1 is the REGISTERED g+1, mirroring the RTL flop that keeps the
+            # leading incrementer off the ext_mem_clk path into next_sel_r. It lags
+            # g by one cycle only in the single cycle after g advances at a group
+            # boundary; next_sel_r is consumed only at the next boundary ~1280
+            # cycles later, so the lag is never observed.
+            next_sel_comb = self.select_top(self.g_plus1, self.progress, eff,
+                                            self.WIPE_GRP_MAX)
         else:
             base_top = base_bot
             sel_diff = 0
-            start_base = base_bot
+            eff = 0
             s_ack_first = 0
-            grp_cross = 0
             pos_next = 0
+            first_sel = 0
+            start_base = base_bot
+            grp_boundary = 0
+            do_redirect = 0
+            next_sel_comb = 0
         return (rd_vld, rd_burst_finish, app_rd_en, base_top, base_bot,
-                sel_diff, start_base, s_ack_first, grp_cross, pos_next)
+                sel_diff, start_base, s_ack_first, do_redirect, pos_next,
+                first_sel, grp_boundary, next_sel_comb)
 
     def observable(self):
         """Everything Pass B compares. Deliberately exhaustive."""
@@ -151,18 +247,23 @@ class FrameFifoRead(object):
                 self.idx_d1)
 
     def wipe_regs(self):
-        """The stage 4 registers that must stay at zero while the two selectors
-        are driven equal. burst_in_grp is excluded on purpose: it free runs on
-        every burst boundary regardless, and is harmless because grp_cross also
-        needs grp_to_cross == 1, which never happens when the selectors agree.
-        This is the other half of the Pass B statement: the new logic is inert,
-        not merely coincidentally equal."""
-        return (self.wipe_pos, self.grp_to_cross, self.wipe_delta)
+        """The band registers that must stay at zero while the two selectors are
+        driven equal. burst_in_grp is excluded on purpose: it free runs on every
+        burst boundary regardless, and is harmless because do_redirect is gated
+        by sel_diff. g never advances when sel_diff is low, so g stays 0 and
+        next_sel_r = select_top(1, 0, eff) = 0 for every effect. This is the
+        other half of the Pass B statement: the new logic is inert, not merely
+        coincidentally equal."""
+        return (self.progress, self.g, self.cur_sel, self.next_sel_r,
+                self.wipe_delta, self.neg_wipe_delta)
 
     def step(self, read_req, idx, idx_top, wrusedw, app_wr_busy,
-             sdr_init_done=1):
+             sdr_init_done=1, effect_in=None):
+        if effect_in is None:
+            effect_in = self.effect
         (rd_vld, rd_burst_finish, app_rd_en, base_top, base_bot, sel_diff,
-         start_base, s_ack_first, grp_cross, pos_next) = self._comb()
+         start_base, s_ack_first, do_redirect, pos_next, first_sel,
+         grp_boundary, next_sel_comb) = self._comb()
 
         # what the SDRAM sees on this cycle
         out_addr = self.app_rd_addr_r
@@ -170,8 +271,9 @@ class FrameFifoRead(object):
         if out_en:
             self._words_seen += 1
             self.words_this_frame += 1
-        if grp_cross:
+        if do_redirect:
             self.last_cross_word = self.words_this_frame
+            self.cross_words.append(self.words_this_frame)
 
         # ---- block 1, the two beat synchronisers
         n_req_d0 = read_req
@@ -183,6 +285,8 @@ class FrameFifoRead(object):
         n_idx_d1 = self.idx_d0
         n_idx_top_d0 = idx_top
         n_idx_top_d1 = self.idx_top_d0
+        n_eff_d0 = effect_in
+        n_eff_d1 = self.effect_d0
 
         # ---- block 2, rd_delay
         if app_rd_en:
@@ -202,8 +306,12 @@ class FrameFifoRead(object):
 
         if self.state == S_ACK:
             n_addr = start_base
-        elif grp_cross:
-            n_addr = (self.app_rd_addr_r + self.wipe_delta) & self.addr_mask
+        elif do_redirect:
+            # entering the top buffer subtracts (base_bot - base_top), entering
+            # the bottom buffer adds it; neg_wipe_delta is precomputed so this is
+            # a 2:1 mux, not a subtractor, on the ext_mem_clk address path
+            delta = self.neg_wipe_delta if self.next_sel_r else self.wipe_delta
+            n_addr = (self.app_rd_addr_r + delta) & self.addr_mask
         elif app_rd_en:
             n_addr = (self.app_rd_addr_r + 1) & self.addr_mask
         else:
@@ -212,39 +320,51 @@ class FrameFifoRead(object):
         n_en_d0 = 1 if (self.app_rd_en_r
                         and (self.burst_cnt + app_rd_en) < self.BURST_SIZE) else 0
 
-        # ---- block 4, stage 4 wipe bookkeeping
-        # Two registers carry the same number on purpose. wipe_pos accumulates
-        # across frames and is written only here, on the first cycle of S_ACK.
-        # grp_to_cross is loaded from the same value and then counts down
-        # inside the frame, which turns the crossing test into a compare
-        # against 1. Sharing one register was the bug this model caught: the in
-        # frame countdown reaches zero long before the next frame read starts,
-        # so the accumulated position is destroyed and the wipe restarts from
-        # its first step every single frame.
-        n_wipe_pos = self.wipe_pos
-        n_grp_to_cross = self.grp_to_cross
+        # ---- block 4, band bookkeeping
+        # progress accumulates across frames and is written only here, on the
+        # first cycle of S_ACK, then frozen for the whole frame so every group
+        # evaluates select_top against the same value (no intra frame tearing).
+        # g counts groups within the frame; cur_sel is the buffer the current
+        # group reads from and always equals select_top(g, progress, eff);
+        # next_sel_r is select_top(g+1, ...) registered every cycle, so the
+        # address mux only ever sees registered signals. Sharing one register
+        # for progress and the in frame position was the bug the original model
+        # caught; keeping progress separate from g/cur_sel avoids it.
+        n_progress = self.progress
+        n_g = self.g
+        n_cur_sel = self.cur_sel
         n_burst_in_grp = self.burst_in_grp
         n_wipe_delta = self.wipe_delta
+        n_neg_wipe_delta = self.neg_wipe_delta
+        n_next_sel_r = next_sel_comb              # registered every cycle
+        # g_plus1 <= g + 1, unconditional every cycle, read from the CURRENT g
+        # (same clock-edge snapshot as n_g), mirroring the RTL flop.
+        n_g_plus1 = self.g + 1
         if self.wipe:
             if s_ack_first:
                 n_burst_in_grp = 0
+                n_g = 0
                 n_wipe_delta = (base_bot - base_top) & self.addr_mask
+                n_neg_wipe_delta = (base_top - base_bot) & self.addr_mask
                 self.words_this_frame = 0
+                self.cross_words = []
                 self.last_cross_word = -1
                 self.frame_grp = pos_next if sel_diff else 0
                 self.frame_top = self.idx_top_d1
                 self.frame_bot = self.idx_d1
+                self.frame_effect = self.effect_d1
                 if sel_diff:
-                    n_wipe_pos = pos_next
-                    n_grp_to_cross = pos_next
+                    n_progress = pos_next
+                    n_cur_sel = first_sel
                 else:
-                    n_wipe_pos = 0
-                    n_grp_to_cross = 0
+                    n_progress = 0
+                    n_cur_sel = 0
             elif rd_burst_finish:
                 if self.burst_in_grp == 4:
                     n_burst_in_grp = 0
-                    if self.grp_to_cross != 0:
-                        n_grp_to_cross = self.grp_to_cross - 1
+                    if sel_diff:
+                        n_g = self.g + 1
+                        n_cur_sel = self.next_sel_r
                 else:
                     n_burst_in_grp = self.burst_in_grp + 1
 
@@ -300,14 +420,19 @@ class FrameFifoRead(object):
         self.read_len_d0, self.read_len_d1 = n_len_d0, n_len_d1
         self.idx_d0, self.idx_d1 = n_idx_d0, n_idx_d1
         self.idx_top_d0, self.idx_top_d1 = n_idx_top_d0, n_idx_top_d1
+        self.effect_d0, self.effect_d1 = n_eff_d0, n_eff_d1
         self.rd_delay = n_rd_delay
         self.burst_cnt = n_burst_cnt
         self.app_rd_addr_r = n_addr
         self.app_rd_en_d0 = n_en_d0
-        self.wipe_pos = n_wipe_pos
-        self.grp_to_cross = n_grp_to_cross
+        self.progress = n_progress
+        self.g = n_g
+        self.g_plus1 = n_g_plus1
+        self.cur_sel = n_cur_sel
+        self.next_sel_r = n_next_sel_r
         self.burst_in_grp = n_burst_in_grp
         self.wipe_delta = n_wipe_delta
+        self.neg_wipe_delta = n_neg_wipe_delta
         self.state = n_state
         self.read_cnt = n_read_cnt
         self.read_len_latch = n_len_latch
@@ -322,12 +447,23 @@ class FrameFifoRead(object):
 # video_transition, clock accurate but only ever ticked on interesting edges
 # ---------------------------------------------------------------------------
 
-ST_IDLE, ST_FADE_OUT, ST_FADE_IN, ST_WIPE, ST_WIPE_END = range(5)
-ST_NAMES = ['IDLE', 'FADE_OUT', 'FADE_IN', 'WIPE', 'WIPE_END']
+ST_IDLE, ST_FADE_OUT, ST_FADE_IN, ST_BAND, ST_WIPE_END = range(5)
+ST_NAMES = ['IDLE', 'FADE_OUT', 'FADE_IN', 'BAND', 'WIPE_END']
+
+# effect codes shared with frame_fifo_read.select_top. 0 and 7 are both "fade"
+# (no band redirect); 1..6 are the horizontal band geometries.
+EFF_NAMES = {0: 'fade', 1: 'wipe-down', 2: 'wipe-up', 3: 'blinds',
+             4: 'split', 5: 'random-bars', 6: 'comb', 7: 'fade'}
 
 
 class VideoTransition(object):
-    """video_transition.v. tick() is one video_clk cycle."""
+    """video_transition.v. tick() is one video_clk cycle.
+
+    I_mode is now 3 bits: 000 auto-cycle (rotate effect_cnt through the six
+    band effects plus fade, one per picture change), 001..110 force one band
+    effect, 111 forces fade. The effect for a transition is sampled once, at
+    the ST_IDLE/pending branch, so a mid-flight DIP change cannot tear it.
+    """
 
     def __init__(self, fade_max=8, wipe_hold=40, wipe_settle=2):
         self.FADE_MAX = fade_max
@@ -337,12 +473,13 @@ class VideoTransition(object):
         self.cur_idx = 0
         self.tgt_idx = 0
         self.hold_cnt = 0
-        self.mode_wipe = 0
+        self.effect_cnt = 7        # auto-cycle counter; 7 makes the first a fade
         self.dv_d = 0
         self.bot_idx = 0
         self.top_idx = 0
         self.img_idx = 0
         self.fade_level = 0
+        self.o_effect = 0
 
     def tick(self, display_valid, disp_idx, frame_start, mode=0):
         dv_rise = 1 if (display_valid and not self.dv_d) else 0
@@ -354,6 +491,7 @@ class VideoTransition(object):
             self.hold_cnt = 0
             self.fade_level = 0
             self.top_idx = self.bot_idx
+            self.o_effect = 0
         elif dv_rise:
             self.cur_idx = disp_idx
             self.tgt_idx = disp_idx
@@ -362,6 +500,7 @@ class VideoTransition(object):
             self.img_idx = disp_idx
             self.fade_level = 0
             self.hold_cnt = 0
+            self.o_effect = 0
             self.state = ST_FADE_IN
         elif frame_start:
             s = self.state
@@ -369,21 +508,27 @@ class VideoTransition(object):
                 if pending:
                     self.tgt_idx = disp_idx
                     self.hold_cnt = 0
-                    # use_wipe mirrors the RTL wire: forced modes pin the choice,
-                    # auto (00) and reserved (11) fall through to the alternator.
-                    # It reads the OLD mode_wipe, matching non-blocking semantics.
-                    if mode == 0b01:
-                        use_wipe = 0
-                    elif mode == 0b10:
-                        use_wipe = 1
+                    # chosen_effect mirrors the RTL wire: auto (000) rotates the
+                    # free running counter, 111 forces fade, 001..110 force that
+                    # band effect. It reads the OLD effect_cnt, matching non
+                    # blocking semantics, then the counter advances.
+                    if mode == 0b000:
+                        chosen = self.effect_cnt
+                    elif mode == 0b111:
+                        chosen = 7
                     else:
-                        use_wipe = self.mode_wipe
-                    if use_wipe:
+                        chosen = mode
+                    use_band = 1 if (chosen != 0 and chosen != 7) else 0
+                    if use_band:
+                        self.o_effect = chosen
                         self.top_idx = disp_idx
-                        self.state = ST_WIPE
+                        self.state = ST_BAND
                     else:
+                        self.o_effect = 0
                         self.state = ST_FADE_OUT
-                    self.mode_wipe ^= 1     # alternator keeps running in every mode
+                    # auto-cycle counter keeps running in every mode, 1..7
+                    self.effect_cnt = 1 if self.effect_cnt >= 7 \
+                        else self.effect_cnt + 1
             elif s == ST_FADE_OUT:
                 if self.fade_level <= 1:
                     self.fade_level = 0
@@ -400,12 +545,13 @@ class VideoTransition(object):
                     self.state = ST_IDLE
                 else:
                     self.fade_level += 1
-            elif s == ST_WIPE:
+            elif s == ST_BAND:
                 if self.hold_cnt >= self.WIPE_HOLD - 1:
                     self.cur_idx = self.tgt_idx
                     self.bot_idx = self.tgt_idx
                     self.img_idx = self.tgt_idx
                     self.hold_cnt = 0
+                    self.o_effect = 0
                     self.state = ST_WIPE_END
                 else:
                     self.hold_cnt += 1
@@ -503,7 +649,8 @@ def pass_a():
              % ST_NAMES[t.state])
     ok("power on fade in ramps 0 -> 8 over 8 frames and lands in IDLE")
 
-    # ---- first transition must be a fade, because mode_wipe resets to 0
+    # ---- first transition must be a fade, because effect_cnt resets to 7 and
+    # auto (mode 000) reads it before advancing, so the first choice is fade
     seq = []
     for f in range(60):
         t.tick(1, 3, 1)                 # sd_card_bmp has moved on to picture 3
@@ -575,8 +722,8 @@ def pass_a():
     for d in targets:
         t2.tick(1, d, 1)
         seen.append((ST_NAMES[t2.state], t2.bot_idx, t2.top_idx))
-    if any(a != b for (_s, a, b) in seen if _s == 'WIPE'):
-        fail("top and bottom diverged from the latched target during a wipe")
+    if any(a != b for (_s, a, b) in seen if _s == 'BAND'):
+        fail("top and bottom diverged from the latched target during a band effect")
     ok("a target that moves mid transition is latched, not chased")
 
     print("  Pass A done")
@@ -633,10 +780,10 @@ def pass_b(cycles=200000, seed=20260902):
                      % (c, ao, an, eo, en, STATE_NAMES[old.state],
                         STATE_NAMES[new.state]))
         wr = new.wipe_regs()
-        if wr != (0, 0, 0):
+        if wr != (0, 0, 0, 0, 0, 0):
             inert += 1
             if inert <= 3:
-                fail("cycle %d: with the selectors driven equal the stage 4 "
+                fail("cycle %d: with the selectors driven equal the band "
                      "registers are %s, they must stay at zero" % (c, wr))
         if old.state == S_END and new.state == S_END:
             frames += 1
@@ -672,14 +819,18 @@ REAL_BURST = 256
 def preload_for(m, grp):
     """Arrange for the next frame read to run with a boundary of grp.
 
-    S_ACK computes wipe_pos_next = saturate(wipe_pos + step) and uses that, so
-    the honest way to aim at a boundary is to load grp - step into wipe_pos and
-    let the real RTL path do the rest. Writing grp straight into the crossing
-    counter would bypass the very logic under test and would also be wrong, the
-    way S_ACK steps it once more.
+    s_ack_first computes pos_next = saturate(progress + step) and freezes it
+    into progress for the whole frame, so the honest way to aim at a boundary is
+    to load grp - step into progress and let the real RTL path do the rest.
+    Writing grp straight into progress would bypass the very ramp logic under
+    test and would also be wrong, the way s_ack_first steps it once more. g,
+    cur_sel and next_sel_r are all re-derived at s_ack_first, so pre-zeroing them
+    here only keeps the model honest between back-to-back frames.
     """
-    m.wipe_pos = max(0, grp - m.WIPE_GRP_STEP)
-    m.grp_to_cross = 0
+    m.progress = max(0, grp - m.WIPE_GRP_STEP)
+    m.g = 0
+    m.cur_sel = 0
+    m.next_sel_r = 0
     m.burst_in_grp = 0
 
 
@@ -809,7 +960,7 @@ def pass_d(frames=400):
     t = VideoTransition(fade_max=3, wipe_hold=SC_HOLD, wipe_settle=2)
     m = FrameFifoRead(SC_ADDRS, SC_LEN, burst_size=SC_BURST, addr_bits=21,
                       burst_bits=9, wipe=True, wipe_grp_max=SC_GROUPS,
-                      wipe_grp_step=SC_STEP)
+                      wipe_grp_step=SC_STEP, effect=1)
     for _ in range(3):
         t.tick(0, 0, 0)
 
@@ -834,10 +985,14 @@ def pass_d(frames=400):
         lvl = t.fade_level
         st_before = t.state
         addrs, _cyc, fgrp, ftop, fbot = run_one_frame(m, t.bot_idx, t.top_idx)
-        t.tick(display_valid, disp_idx, 1)
+        # Forced to wipe-down (mode 001) so this stays the single-boundary
+        # regression the hardware was verified against: the read model runs
+        # effect=1 and the attribution below assumes exactly one top/bottom
+        # split. The multi-effect band geometry is Pass G's job.
+        t.tick(display_valid, disp_idx, 1, mode=0b001)
         if st_before == ST_IDLE and t.state == ST_FADE_OUT:
             n_fade += 1
-        elif st_before == ST_IDLE and t.state == ST_WIPE:
+        elif st_before == ST_IDLE and t.state == ST_BAND:
             n_wipe += 1
 
         # Attribute every word to a buffer using the boundary the read model
@@ -1097,28 +1252,30 @@ def _drive_transition(t, new_idx, mode):
 
     Assumes t is in ST_IDLE with display_valid already asserted and dv_d=1, so
     no dv_rise re-init fires. Ticks one frame at a time (frame_start=1), records
-    which effect the controller committed to when it left ST_IDLE, then keeps
-    ticking until it settles back in ST_IDLE having reached new_idx. Returns
-    'fade', 'wipe', or None if it never committed (caller treats None as a fail).
+    the effect CODE the controller committed to when it left ST_IDLE, then keeps
+    ticking until it settles back in ST_IDLE having reached new_idx. Returns the
+    code (1..6 band, 7 fade), or None if it never committed (caller treats None
+    as a fail). The band code is read off o_effect on the very tick that enters
+    ST_BAND, before ST_BAND completion clears it back to 0.
     """
     effect = None
     guard = 4 * (t.FADE_MAX + t.WIPE_HOLD + t.WIPE_SETTLE) + 64
     for _ in range(guard):
         st_before = t.state
         t.tick(1, new_idx, 1, mode=mode)
-        if st_before == ST_IDLE and t.state == ST_FADE_OUT:
-            effect = 'fade'
-        elif st_before == ST_IDLE and t.state == ST_WIPE:
-            effect = 'wipe'
+        if st_before == ST_IDLE and t.state == ST_BAND:
+            effect = t.o_effect            # 1..6
+        elif st_before == ST_IDLE and t.state == ST_FADE_OUT:
+            effect = 7                     # fade
         if effect is not None and t.state == ST_IDLE and t.cur_idx == new_idx:
             return effect
     return effect
 
 
 def _effect_sequence(mode, n_transitions, cls=VideoTransition):
-    """Return the list of effects ('fade'/'wipe') for n picture changes under a
-    fixed I_mode. Small counters keep it fast; the effect choice is decided once
-    per transition and is independent of FADE_MAX/WIPE_HOLD/WIPE_SETTLE."""
+    """Return the list of effect codes for n picture changes under a fixed
+    I_mode. Small counters keep it fast; the effect choice is decided once per
+    transition and is independent of FADE_MAX/WIPE_HOLD/WIPE_SETTLE."""
     t = cls(fade_max=3, wipe_hold=6, wipe_settle=2)
     for _ in range(3):
         t.tick(0, 0, 0, mode=mode)          # display_valid low, dv_d clears
@@ -1139,63 +1296,237 @@ def _effect_sequence(mode, n_transitions, cls=VideoTransition):
 
 
 class _BrokenVideoTransition(VideoTransition):
-    """Negative control: use_wipe with the two forced-mode codes swapped, i.e.
-    exactly the mis-wiring where 01 drives wipe and 10 drives fade."""
+    """Negative control: the two forced wipe codes swapped, i.e. exactly the
+    mis-wiring where 001 drives wipe-up and 010 drives wipe-down."""
 
     def tick(self, display_valid, disp_idx, frame_start, mode=0):
-        swapped = {0b01: 0b10, 0b10: 0b01}.get(mode, mode)
+        swapped = {0b001: 0b010, 0b010: 0b001}.get(mode, mode)
         return VideoTransition.tick(self, display_valid, disp_idx, frame_start,
                                     mode=swapped)
 
 
+def _names(seq):
+    return ','.join(EFF_NAMES.get(e, '?%d' % e) for e in seq)
+
+
 def pass_f():
-    print("Pass F  DIP I_mode selects the transition effect")
-    N = 6
-    auto = _effect_sequence(0b00, N)
-    fade = _effect_sequence(0b01, N)
-    wipe = _effect_sequence(0b10, N)
-    resv = _effect_sequence(0b11, N)
-    if None in (auto, fade, wipe, resv):
-        fail("a mode never settled into a clean transition sequence: "
-             "auto=%s fade=%s wipe=%s resv=%s" % (auto, fade, wipe, resv))
+    print("Pass F  DIP I_mode (3 bit) selects the transition effect")
+    N = 8
+    seqs = {m: _effect_sequence(m, N) for m in range(8)}
+    if any(seqs[m] is None for m in range(8)):
+        fail("a mode never settled into a clean transition sequence: %s"
+             % {m: seqs[m] for m in range(8)})
         print("  Pass F done")
         return
 
-    exp_auto = ['fade' if i % 2 == 0 else 'wipe' for i in range(N)]
-    exp_fade = ['fade'] * N
-    exp_wipe = ['wipe'] * N
-    exp_resv = exp_auto
+    # expected: auto (000) rotates 7,1,2,3,4,5,6,7,...; forced 001..110 are a
+    # constant code; 111 forces fade. The rotation starts at 7 because
+    # effect_cnt resets to 7 and is read before it advances.
+    exp = {}
+    c = 7
+    auto = []
+    for _ in range(N):
+        auto.append(c)
+        c = 1 if c >= 7 else c + 1
+    exp[0] = auto
+    for m in range(1, 7):
+        exp[m] = [m] * N
+    exp[7] = [7] * N
+    labels = {0: 'auto-cycle', 7: 'fade only'}
 
-    if auto == exp_auto:
-        ok("mode 00 (auto) alternates from fade: " + ",".join(auto))
-    else:
-        fail("mode 00 expected %s got %s" % (exp_auto, auto))
-    if fade == exp_fade:
-        ok("mode 01 (fade only) is all fade: " + ",".join(fade))
-    else:
-        fail("mode 01 expected %s got %s" % (exp_fade, fade))
-    if wipe == exp_wipe:
-        ok("mode 10 (wipe only) is all wipe: " + ",".join(wipe))
-    else:
-        fail("mode 10 expected %s got %s" % (exp_wipe, wipe))
-    if resv == exp_resv:
-        ok("mode 11 (reserved) falls through to auto: " + ",".join(resv))
-    else:
-        fail("mode 11 expected %s got %s" % (exp_resv, resv))
+    for m in range(8):
+        name = labels.get(m, EFF_NAMES[m] + ' only')
+        if seqs[m] == exp[m]:
+            ok("mode %s (%-13s): %s"
+               % (format(m, '03b'), name, _names(seqs[m])))
+        else:
+            fail("mode %s (%s) expected %s got %s"
+                 % (format(m, '03b'), name, _names(exp[m]), _names(seqs[m])))
 
-    # Negative control: inject the swapped-mapping bug and confirm the fade-only
+    # Negative control: inject the swapped-code bug and confirm the mode-001
     # signature changes, proving the checks above can actually fail rather than
     # passing for any old mapping.
-    broken = _effect_sequence(0b01, N, cls=_BrokenVideoTransition)
-    if broken == exp_fade:
-        fail("negative control is toothless: a swapped fade/wipe mapping still "
-             "produced the fade-only signature")
+    broken = _effect_sequence(0b001, N, cls=_BrokenVideoTransition)
+    if broken == exp[1]:
+        fail("negative control is toothless: swapping 001/010 still produced the "
+             "wipe-down signature")
     elif broken is None:
         fail("negative control did not run")
     else:
-        ok("negative control: swapping the forced-mode codes turns mode 01 into "
-           "%s, which the fade-only check rejects" % ",".join(broken))
+        ok("negative control: swapping the forced codes turns mode 001 into %s, "
+           "which the wipe-down check rejects" % _names(broken))
     print("  Pass F done")
+
+
+# ---------------------------------------------------------------------------
+# Pass G -- band effect geometry, all six effects across the ramp
+# ---------------------------------------------------------------------------
+
+def _band_sel(eff, progress, grp_max=REAL_GROUPS):
+    """select_top over every group of one frame, as a plain list of 0/1."""
+    return [FrameFifoRead.select_top(g, progress, eff, grp_max)
+            for g in range(grp_max)]
+
+
+def _band_strip(eff, progress, grp_max=REAL_GROUPS):
+    """ASCII picture of the frame: '#' is a group revealed from the top buffer,
+    '.' still shows the outgoing bottom buffer. One row per progress value makes
+    the vertical sweep visible to the eye."""
+    return ''.join('#' if s else '.' for s in _band_sel(eff, progress, grp_max))
+
+
+class _BrokenBandEngine(FrameFifoRead):
+    """Negative control for Pass G: select_top WITHOUT the progress >= grp_max
+    saturation guard on blinds (3) and split (4). At full ramp the last slat of
+    the blinds and the outermost group of the split then never reveal, leaving
+    holes in the panel -- exactly what the coverage assertion forbids. The
+    override is reached because _comb calls self.select_top, which resolves to
+    this subclass method."""
+
+    @staticmethod
+    def select_top(g, progress, eff, grp_max=240):
+        if eff == 3:                                   # blinds, guard dropped
+            return 1 if (g & 0xF) < (progress >> 4) else 0
+        if eff == 4:                                   # split, guard dropped
+            half = grp_max >> 1
+            diff = (g - half) if g > half else (half - g)
+            return 1 if diff < (progress >> 1) else 0
+        return FrameFifoRead.select_top(g, progress, eff, grp_max)
+
+
+def pass_g():
+    print("Pass G  band effect geometry, six effects across the ramp")
+    ramp = list(range(REAL_STEP, REAL_GROUPS + 1, REAL_STEP))   # 8,16,..,240
+    if ramp[-1] != REAL_GROUPS or len(ramp) != REAL_GROUPS // REAL_STEP:
+        fail("the ramp does not land exactly on WIPE_GRP_MAX = %d" % REAL_GROUPS)
+
+    # ---- G0, the eff4 split timing rewrite is identical to the golden form ----
+    # frame_fifo_read.v computes split as two PARALLEL compares against prog
+    # derived bounds, (gi > half-K) && (gi < half+K) with K = prog>>1, instead of
+    # the series |gi-half| < K, so gi no longer feeds a subtractor -> mux ->
+    # compare chain on the ext_mem_clk path into next_sel_r (the -0.184ns
+    # violation). |gi-half| < K is algebraically (gi > half-K) && (gi < half+K)
+    # for K >= 0, including the gi == half and K == 0 edges; prove it over the
+    # whole reachable input space so the structural fix cannot shift geometry.
+    # The prog >= grp_max guard short circuits before half-K could underflow.
+    def _split_rtl(gi, prog, grp_max):
+        if prog >= grp_max:
+            return 1
+        half = grp_max >> 1
+        k = prog >> 1
+        return 1 if (gi > (half - k) and gi < (half + k)) else 0
+
+    def _split_gold(gi, prog, grp_max):
+        if prog >= grp_max:
+            return 1
+        half = grp_max >> 1
+        diff = (gi - half) if gi > half else (half - gi)
+        return 1 if diff < (prog >> 1) else 0
+
+    mism = 0
+    for grp_max in (REAL_GROUPS, 16, 8):     # real panel + reduced coupled geoms
+        for prog in range(0, grp_max + 1):
+            for gi in range(0, grp_max + 1):
+                if _split_rtl(gi, prog, grp_max) != _split_gold(gi, prog, grp_max):
+                    mism += 1
+                    if mism <= 5:
+                        fail("eff4 split rewrite diverges: grp_max %d prog %d gi %d "
+                             "rtl %d gold %d"
+                             % (grp_max, prog, gi, _split_rtl(gi, prog, grp_max),
+                                _split_gold(gi, prog, grp_max)))
+    if mism == 0:
+        ok("G0  eff4 split two-compare RTL form == |gi-half|<K golden form over "
+           "all gi/prog at grp_max %s" % [REAL_GROUPS, 16, 8])
+
+    # ---- G1, pure function: monotonic sweep to full coverage ----
+    for eff in range(1, 7):
+        counts = [sum(_band_sel(eff, P)) for P in ramp]
+        if counts[-1] != REAL_GROUPS:
+            fail("effect %d (%s) does not fully reveal at progress %d: %d/%d "
+                 "groups from the top buffer"
+                 % (eff, EFF_NAMES[eff], REAL_GROUPS, counts[-1], REAL_GROUPS))
+        if any(counts[i + 1] < counts[i] for i in range(len(counts) - 1)):
+            fail("effect %d (%s) revealed count is not monotonic over the ramp: "
+                 "%s" % (eff, EFF_NAMES[eff], counts))
+        # wipe down/up and comb must already show something on the first step;
+        # blinds legitimately waits until progress reaches one slat (16)
+        if counts[0] == 0 and eff in (1, 2, 6):
+            fail("effect %d (%s) reveals nothing at the first ramp step"
+                 % (eff, EFF_NAMES[eff]))
+    ok("G1  all six effects sweep monotonically to full coverage at progress %d"
+       % REAL_GROUPS)
+
+    # eyeball the sweep: first step, mid ramp, saturated, one strip per effect
+    for eff in range(1, 7):
+        print("      effect %d %-12s" % (eff, EFF_NAMES[eff]))
+        for P in (ramp[0], REAL_GROUPS // 2, REAL_GROUPS):
+            print("        p=%3d |%s|" % (P, _band_strip(eff, P)))
+
+    # ---- G2, cycle accurate: word-by-word attribution through the FSM ----
+    bot_idx, top_idx = 1, 2
+    base_bot, base_top = REAL_ADDRS[bot_idx], REAL_ADDRS[top_idx]
+    probes = (ramp[0], REAL_GROUPS // 2, REAL_GROUPS)
+    for eff in range(1, 7):
+        for P in probes:
+            m = FrameFifoRead(REAL_ADDRS, REAL_LEN, burst_size=REAL_BURST,
+                              wipe=True, wipe_grp_max=REAL_GROUPS,
+                              wipe_grp_step=REAL_STEP, effect=eff)
+            preload_for(m, P)
+            addrs, cyc, fgrp, ftop, fbot = run_one_frame(m, bot_idx, top_idx)
+            if fgrp != P or ftop != top_idx or fbot != bot_idx:
+                fail("effect %d progress %d: frame read with grp %d top %d bot "
+                     "%d, expected %d %d %d"
+                     % (eff, P, fgrp, ftop, fbot, P, top_idx, bot_idx))
+                continue
+            sel = _band_sel(eff, P)
+            bad = 0
+            first_bad = None
+            for W, a in enumerate(addrs):
+                g = W // (2 * REAL_LINE)
+                want = (base_top if sel[g] else base_bot) + W
+                if a != want:
+                    bad += 1
+                    if first_bad is None:
+                        first_bad = (W, g, a, want)
+            if bad:
+                W, g, a, want = first_bad
+                fail("effect %d (%s) progress %d: %d words mis-attributed, first "
+                     "at word %d group %d addr %d expected %d"
+                     % (eff, EFF_NAMES[eff], P, bad, W, g, a, want))
+            # the redirects must land exactly on the select_top flips, each on a
+            # whole two-line group boundary; sel[240] is evaluated separately
+            # because the list only covers groups 0..239
+            exp_cross = []
+            for g in range(REAL_GROUPS):
+                nxt = FrameFifoRead.select_top(g + 1, P, eff, REAL_GROUPS)
+                if nxt != sel[g]:
+                    exp_cross.append((g + 1) * (2 * REAL_LINE))
+            if m.cross_words != exp_cross:
+                fail("effect %d (%s) progress %d: %d redirects %s expected %d %s"
+                     % (eff, EFF_NAMES[eff], P, len(m.cross_words),
+                        m.cross_words[:8], len(exp_cross), exp_cross[:8]))
+            if any(cw % (2 * REAL_LINE) for cw in m.cross_words):
+                fail("effect %d progress %d: a redirect fired off a group "
+                     "boundary" % (eff, P))
+        ok("G2  effect %d (%-12s): attribution + group-aligned redirects correct "
+           "at progress %s" % (eff, EFF_NAMES[eff], list(probes)))
+
+    # ---- G3, negative control: the saturation guard is load bearing ----
+    real_full = all(sum(_band_sel(e, REAL_GROUPS)) == REAL_GROUPS for e in (3, 4))
+    holes = {e: REAL_GROUPS - sum(_BrokenBandEngine.select_top(
+                 g, REAL_GROUPS, e, REAL_GROUPS) for g in range(REAL_GROUPS))
+             for e in (3, 4)}
+    if not real_full:
+        fail("the real engine does not reach full coverage at saturation, so the "
+             "guard check proves nothing")
+    elif all(h == 0 for h in holes.values()):
+        fail("negative control is toothless: dropping the saturation guard still "
+             "reached full coverage for blinds and split")
+    else:
+        ok("G3  negative control: without the saturation guard blinds/split leave "
+           "%s groups unrevealed at full ramp, which the coverage check rejects"
+           % holes)
+    print("  Pass G done")
 
 
 def main():
@@ -1212,6 +1543,8 @@ def main():
     pass_d()
     print()
     pass_f()
+    print()
+    pass_g()
     print()
     print("=" * 72)
     if failures:

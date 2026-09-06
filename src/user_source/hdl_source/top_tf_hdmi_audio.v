@@ -5,7 +5,7 @@ module top(
     input                       key1,           // 手动下一张
     input                       key2,           // 自动播放 开/关
     input                       key3,           // 亮度档位循环
-    input       [3:0]           sw,             // 拨码开关：sw[1:0] 选转场特效，sw[3:2] 预留
+    input       [3:0]           sw,             // 拨码开关：sw[2:0] (SW1-3) 选转场特效，sw[3] (SW4) 预留
 
     output [5:0]                seg_sel,
     output [7:0]                seg_data,
@@ -61,20 +61,42 @@ wire        auto_play_enabled;
 wire        key3_bright_press;
 wire        video_frame_start;
 
-// Stage 4 transition controller outputs, all video_clk domain. bot/top are the
+// Stage 4/5 transition controller outputs, all video_clk domain. bot/top are the
 // two buffer selectors frame_fifo_read turns into read base addresses; they are
-// equal except while a vertical wipe is revealing the new picture from the top
-// of the panel down.
+// equal except while a band effect is revealing the new picture. trans_effect is
+// the band code 1..6 that tells frame_fifo_read's select_top which sweep shape to
+// draw, and is 0 when idle or fading.
 wire [1:0]  trans_bot_idx;
 wire [1:0]  trans_top_idx;
+wire [2:0]  trans_effect;
 wire [1:0]  trans_img_idx;
 wire [3:0]  trans_fade_level;
 // DIP switches are active low (ON connects the pin to GND), so invert the
-// synchronized value to get an intuitive ON=1 mode. 00 auto, 01 fade, 10 wipe.
-wire [1:0]  trans_mode = ~sw_v1;
+// synchronized value to get an intuitive ON=1 mode. 3 bits: 000 auto-cycle,
+// 001..110 force one band effect, 111 force fade. sw[3] (SW4) stays reserved.
+// Assigned below, next to sw_v1's declaration: initializing it here made TD warn
+// HDL-5373 (used before declaration) and risked binding a 1-bit implicit net.
+wire [2:0]  trans_mode;
 
 wire [3:0]  state_code;
 wire [6:0]  seg_data_0;
+// Audio bring-up readout on the three 7-segment digits left of state_code.
+// chain = {wav_found, audio_phase, streamer ever wrote, header magic rejected},
+// wr = peak audio FIFO occupancy on the sd_card_clk side, rd = peak occupancy on
+// the video_clk side. A non-zero wr with a zero rd pins the fault to the CDC.
+wire [3:0]  dbg_audio_chain;
+wire [3:0]  dbg_aud_wr_peak;
+wire [3:0]  dbg_gate;
+wire [3:0]  dbg_loaded_cnt;
+wire [3:0]  dbg_fail;
+wire [3:0]  dbg_found_cnt;
+wire [3:0]  dbg_next_idx;
+wire [6:0]  seg_data_aud_chain;
+wire [6:0]  seg_data_gate;
+wire [6:0]  seg_data_cnt;
+wire [6:0]  seg_data_fail;
+wire [6:0]  seg_data_found;
+wire [6:0]  seg_data_next;
 
 wire        video_read_req;
 wire        video_read_req_ack;
@@ -104,9 +126,11 @@ reg         display_valid_v1;
 reg  [2:0]  brightness_level;
 reg  [2:0]  brightness_level_v0;
 reg  [2:0]  brightness_level_v1;
-reg  [1:0]  sw_v0;
-reg  [1:0]  sw_v1;
+reg  [2:0]  sw_v0;
+reg  [2:0]  sw_v1;
 reg         vs_d;
+
+assign trans_mode = ~sw_v1;
 
 wire App_rd_en;
 wire [ADDR_BITS-1:0] App_rd_addr;
@@ -235,8 +259,8 @@ always @(posedge video_clk or posedge rst_all) begin
         display_valid_v1 <= 1'b0;
         brightness_level_v0 <= 3'd2;
         brightness_level_v1 <= 3'd2;
-        sw_v0 <= 2'b11;                     // ~2'b11 = 2'b00 = AUTO out of reset
-        sw_v1 <= 2'b11;
+        sw_v0 <= 3'b111;                    // ~3'b111 = 3'b000 = auto-cycle out of reset
+        sw_v1 <= 3'b111;
         vs_d <= 1'b0;
     end else begin
         disp_buf_idx_v0  <= disp_buf_idx;
@@ -249,7 +273,7 @@ always @(posedge video_clk or posedge rst_all) begin
         display_valid_v1 <= display_valid_v0;
         brightness_level_v0 <= brightness_level;
         brightness_level_v1 <= brightness_level_v0;
-        sw_v0 <= sw[1:0];                   // synchronize raw active-low pins
+        sw_v0 <= sw[2:0];                   // synchronize raw active-low pins SW1-3, sw[3] reserved
         sw_v1 <= sw_v0;
         vs_d <= vs;
     end
@@ -282,6 +306,13 @@ sd_card_bmp #(
     .aud_fifo_we       (aud_fifo_we),
     .aud_fifo_di       (aud_fifo_di),
     .aud_fifo_wrusedw  (aud_fifo_wrusedw),
+    .dbg_audio_chain   (dbg_audio_chain),
+    .dbg_aud_wr_peak   (dbg_aud_wr_peak),
+    .dbg_gate          (dbg_gate),
+    .dbg_loaded_cnt    (dbg_loaded_cnt),
+    .dbg_fail          (dbg_fail),
+    .dbg_found_cnt     (dbg_found_cnt),
+    .dbg_next_idx      (dbg_next_idx),
     .SD_nCS            (sd_ncs),
     .SD_DCLK           (sd_dclk),
     .SD_MOSI           (sd_mosi),
@@ -293,16 +324,47 @@ seg_decoder seg_decoder_m0(
     .seg_data          (seg_data_0)
 );
 
+// Audio bring-up readout; all six digits are used. Left to right the panel
+// reads [loaded count][fail cause][scan found count][next load index][chain]
+// [state]. With chain == 8 and count < 4, found vs next separates "the scan
+// never saw a fourth BMP" (found < 4) from "the fourth load was abandoned"
+// (found == 4, next == 4), and fail says which watchdog did it: bit3 the 1 s
+// no-progress stall, bit2 a rejected header, bits1:0 the retry counter.
+seg_decoder seg_decoder_aud_cnt(
+    .bin_data          (dbg_loaded_cnt),
+    .seg_data          (seg_data_cnt)
+);
+
+seg_decoder seg_decoder_aud_fail(
+    .bin_data          (dbg_fail),
+    .seg_data          (seg_data_fail)
+);
+
+seg_decoder seg_decoder_aud_found(
+    .bin_data          (dbg_found_cnt),
+    .seg_data          (seg_data_found)
+);
+
+seg_decoder seg_decoder_aud_next(
+    .bin_data          (dbg_next_idx),
+    .seg_data          (seg_data_next)
+);
+
+seg_decoder seg_decoder_aud_chain(
+    .bin_data          (dbg_audio_chain),
+    .seg_data          (seg_data_aud_chain)
+);
+
 seg_scan seg_scan_m0(
     .clk               (clk),
     .rst_n             (rst_n),
     .seg_sel           (seg_sel),
     .seg_data          (seg_data),
-    .seg_data_0        ({1'b1,7'b1111_111}),
-    .seg_data_1        ({1'b1,7'b1111_111}),
-    .seg_data_2        ({1'b1,7'b1111_111}),
-    .seg_data_3        ({1'b1,7'b1111_111}),
-    .seg_data_4        ({1'b1,7'b1111_111}),
+    .seg_data_0        ({1'b1,seg_data_cnt}),
+    .seg_data_1        ({1'b1,seg_data_fail}),
+    .seg_data_2        ({1'b1,seg_data_found}),
+    .seg_data_3        ({1'b1,seg_data_next}),
+    .seg_data_4        ({1'b1,seg_data_aud_chain}),
     .seg_data_5        ({1'b1,seg_data_0})
 );
 
@@ -363,6 +425,7 @@ video_transition #(
     .I_mode          (trans_mode),
     .O_bot_idx       (trans_bot_idx),
     .O_top_idx       (trans_top_idx),
+    .O_effect        (trans_effect),
     .O_img_idx       (trans_img_idx),
     .O_fade_level    (trans_fade_level)
 );
@@ -431,6 +494,7 @@ frame_read_write #(
     .read_addr_3       (BUF3_ADDR),
     .read_addr_index   (trans_bot_idx),
     .read_addr_index_top (trans_top_idx),
+    .read_effect       (trans_effect),
     .read_len          (FRAME_PIXELS),
     .read_en           (video_read_en),
     .read_data         (video_read_data),

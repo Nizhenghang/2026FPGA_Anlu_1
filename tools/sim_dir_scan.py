@@ -174,6 +174,8 @@ def replay_scan(vol, target, max_sectors=128, verbose=False):
     print("")
 
     found = []
+    wav = None            # (label, clus, size, abs_sector, sec_count, i)
+    wav_captured = False  # bmp_read.v's wav_captured latch: first match only
     stopped = None
     sec_count = 0
     while sec_count < max_sectors:
@@ -210,6 +212,8 @@ def replay_scan(vol, target, max_sectors=128, verbose=False):
                 and clus >= 2 and size != 0
             ext_bmp = ext.lower() == b"bmp"
             is_bmp = is_file and ext_bmp
+            ext_wav = ext.lower() == b"wav"
+            is_wav = is_file and ext_wav
 
             if is_bmp:
                 # dir_file_sector_now, the value the RTL would record.
@@ -217,6 +221,15 @@ def replay_scan(vol, target, max_sectors=128, verbose=False):
                 abs_sector = vol.data_start_abs + off
                 found.append((label, clus, size, abs_sector))
                 note = "FOUND  cluster %d -> LBA %d" % (clus, abs_sector)
+            elif is_wav and not wav_captured:
+                # The RTL's third branch: else-if after the BMP test, so a WAV
+                # only latches when it is not also a BMP match, and only once.
+                off = cluster_offset(clus - 2, vol.sec_per_clus)
+                abs_sector = vol.data_start_abs + off
+                wav = (label, clus, size, abs_sector, sec_count, i)
+                wav_captured = True
+                note = "WAV    captured, cluster %d -> LBA %d, size %d" % (
+                    clus, abs_sector, size)
             elif fb == 0x00:
                 note = "STOP   first_byte 0x00, scan_done asserted here"
             else:
@@ -238,7 +251,7 @@ def replay_scan(vol, target, max_sectors=128, verbose=False):
                         why.append("extension %r is not BMP" % exts)
                 note = "skip   %s" % ("; ".join(why) if why else "not a file entry")
 
-            if verbose or is_bmp or fb == 0x00:
+            if verbose or is_bmp or is_wav or fb == 0x00:
                 print("  %s  fb=0x%02x attr=0x%02x  %-30s %s"
                       % (slot, fb, attr, label, note))
 
@@ -260,7 +273,17 @@ def replay_scan(vol, target, max_sectors=128, verbose=False):
     print("")
     print("  scanner recorded %d image(s), stop reason:" % len(found))
     print("    %s" % stopped)
-    return found, stopped
+    if wav:
+        print("  scanner captured WAV: %s" % wav[0])
+        print("    at directory sector %d entry %d, before the stop above: %s"
+              % (wav[4], wav[5], "YES" if found else "n/a"))
+        print("    wav_sector = %d, wav_size = %d -> wav_found latches, so"
+              % (wav[3], wav[2]))
+        print("    sd_card_bmp's audio_phase gate can be satisfied")
+    else:
+        print("  scanner captured NO WAV: wav_found stays 0, audio_phase can")
+        print("    never latch, and the design is silent forever")
+    return found, stopped, wav
 
 
 def main(argv):
@@ -316,7 +339,21 @@ def main(argv):
                   % vol.sec_per_clus)
             print("")
 
-        found, stopped = replay_scan(vol, target, verbose=verbose)
+        found, stopped, wav = replay_scan(vol, target, verbose=verbose)
+
+        print("")
+        wavs_on_disk = sorted(e for e in os.listdir(
+            drive.rstrip("\\") + "\\") if e.lower().endswith(".wav"))
+        print("Explorer sees %d WAV(s): %s"
+              % (len(wavs_on_disk), ", ".join(wavs_on_disk) if wavs_on_disk else "none"))
+        if wavs_on_disk and not wav:
+            print("")
+            print("VERDICT: a WAV is on the card but ST_SCAN_DIR never latched it,")
+            print("  so wav_found stays 0 and audio_phase can never assert. The")
+            print("  scanner stops as soon as scan_found_total reaches %d BMPs, so"
+                  % target)
+            print("  the WAV entry must sit BEFORE the last BMP in physical order.")
+            return 1
 
         print("")
         print("=" * 72)

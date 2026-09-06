@@ -455,6 +455,8 @@ CASES = [
     ("64x1080  (max h down, max w up)",         64, 1080),
     ("1920x64  (max w down, max h up)",       1920,  64),
     ("100x100  (odd, non-power-of-two)",       100, 100),
+    ("159x119  (demo card, 4x to near-full)",  159, 119),
+    ("128x96   (demo card, 4x letterbox)",     128,  96),
     ("1024x768 (typical XGA)",                1024, 768),
     ("1280x720 (HD)",                         1280, 720),
 ]
@@ -467,6 +469,7 @@ PRESSURE_CASES = [
     ("64x64    (4x clamp, widest border)",       64,  64),
     ("100x100  (odd geometry)",                 100, 100),
     ("320x240  (2x upscale, acceptance)",       320, 240),
+    ("128x96   (4x letterbox, demo card)",      128,  96),
     ("1920x64  (4x vertical, 3x horizontal)",  1920,  64),
     ("64x120   (4x vertical clamp boundary)",    64, 120),
     ("64x119   (narrowest source, most rows)",   64, 119),

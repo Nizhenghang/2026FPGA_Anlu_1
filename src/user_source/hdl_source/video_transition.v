@@ -16,23 +16,31 @@
 //   stay valid for the whole transition. That is what makes the wipe below safe
 //   to read from two buffers in one frame -- there is no writer to race with.
 //
-// Effect 1, fade out / fade in
+// Fade, the non band effect
 //   dim to black over FADE_MAX frames, hand the panel over to the target while
-//   the screen is black, then brighten over FADE_MAX frames.
+//   the screen is black, then brighten over FADE_MAX frames. The selectors stay
+//   equal throughout, so frame_fifo_read's band engine is inert and O_effect is
+//   driven to 0.
 //
-// Effect 2, vertical wipe
+// Band effects, the vertical sweep family
 //   O_top_idx is set to the target while O_bot_idx stays on the outgoing
-//   picture. frame_fifo_read advances its own boundary by WIPE_GRP_STEP
-//   two-line groups on every frame read it sees the two selectors disagree, so
-//   the new picture is revealed from the top of the panel downwards. The
-//   selectors are made equal again once the boundary has had time to saturate,
-//   and that equality is also what resets the boundary for the next wipe.
+//   picture, and O_effect carries a band code 1..6. frame_fifo_read sees the two
+//   selectors disagree, freezes O_effect, and advances its own ramp by
+//   WIPE_GRP_STEP two-line groups on every frame read; its select_top function
+//   turns that ramp plus the code into a per-group buffer choice, so the new
+//   picture sweeps in as a wipe, blinds, centre split, scrambled bars or comb.
+//   All six share the same 30 frame ramp and the same group-boundary redirect
+//   mechanism, so they are the old single wipe generalised bit for bit from one
+//   crossing to many. The selectors are made equal again once the ramp has had
+//   time to saturate, and that equality is also what resets the engine for the
+//   next transition.
 //
-//   By default (I_mode=00, auto) the two effects alternate, one per picture
-//   change, so a carousel of four pictures shows both of them within a single
-//   pass. mode_wipe resets to 0, which makes the first transition a fade.
-//   I_mode can instead pin the choice to fade only (01) or wipe only (10); see
-//   the use_wipe wire below. mode=11 is reserved and behaves as auto.
+//   I_mode is 3 bits. 000 is auto-cycle: effect_cnt rotates 7,1,2,3,4,5,6,7,...
+//   one per picture change, so a carousel shows fade then every band effect in
+//   turn. effect_cnt resets to 7, which makes the very first transition a fade.
+//   001..110 force one band effect, 111 forces fade; see the chosen_effect wire
+//   below. The effect for a transition is sampled once, at the ST_IDLE/pending
+//   branch, so a mid-flight DIP change cannot tear a transition in progress.
 //
 // Frame alignment, and why the swap lands where it does
 //   video_timing_data raises read_req on the vsync edge, and I_frame_start here
@@ -86,10 +94,11 @@ module video_transition #(
     input  wire        I_frame_start,       // one pulse per frame, see the alignment note above
     input  wire        I_display_valid,     // at least one picture has been committed
     input  wire [1:0]  I_disp_idx,          // the picture sd_card_bmp wants shown, synchronised
-    input  wire [1:0]  I_mode,              // transition select, quasi static from DIP switches: 00 auto alternate, 01 fade only, 10 wipe only, 11 reserved (auto)
+    input  wire [2:0]  I_mode,              // transition select, quasi static from DIP switches: 000 auto-cycle, 001..110 force that band effect, 111 force fade
 
     output reg  [1:0]  O_bot_idx,           // frame_fifo_read read_addr_index     : boundary line and below
     output reg  [1:0]  O_top_idx,           // frame_fifo_read read_addr_index_top : above the boundary
+    output reg  [2:0]  O_effect,            // frame_fifo_read effect : band code 1..6, 0 means no band redirect (fade / idle)
     output reg  [1:0]  O_img_idx,           // what the OSD should call the current picture
     output reg  [3:0]  O_fade_level         // video_fade scale level, 0 is black
 );
@@ -97,27 +106,30 @@ module video_transition #(
 localparam [2:0] ST_IDLE     = 3'd0;
 localparam [2:0] ST_FADE_OUT = 3'd1;
 localparam [2:0] ST_FADE_IN  = 3'd2;
-localparam [2:0] ST_WIPE     = 3'd3;
+localparam [2:0] ST_BAND     = 3'd3;
 localparam [2:0] ST_WIPE_END = 3'd4;
 
 reg [2:0] state;
 reg [1:0] cur_idx;          // the picture the panel is showing, i.e. what O_bot_idx will settle on
 reg [1:0] tgt_idx;          // latched at transition start so a second advance mid transition cannot move the goalposts
 reg [5:0] hold_cnt;
-reg       mode_wipe;        // alternates, 0 is fade
+reg [2:0] effect_cnt;       // auto-cycle counter, rotates 7,1,2,3,4,5,6,7,... one per transition; 7 resets so the first is a fade
 reg       dv_d;
 
 wire dv_rise = I_display_valid && !dv_d;
 wire pending = (I_disp_idx != cur_idx);
 
-// Effect select for the transition that is about to start. Forced modes pin the
-// choice; auto (00) and reserved (11) fall through to the free running
-// alternator so a carousel still shows both effects. Sampled combinationally at
-// the ST_IDLE/pending branch below, i.e. once per transition, so a mid-flight
-// DIP change cannot tear a transition already in progress.
-wire use_wipe = (I_mode == 2'b01) ? 1'b0 :
-                (I_mode == 2'b10) ? 1'b1 :
-                mode_wipe;
+// Effect select for the transition that is about to start. Auto-cycle (000)
+// rotates the free running effect_cnt through fade and the six band effects; 111
+// forces fade; 001..110 force that band effect. chosen_effect reads the OLD
+// effect_cnt, matching non-blocking semantics, and use_band is the "drive the
+// selectors apart and ramp" condition. Sampled combinationally at the
+// ST_IDLE/pending branch below, i.e. once per transition, so a mid-flight DIP
+// change cannot tear a transition already in progress.
+wire [2:0] chosen_effect = (I_mode == 3'b000) ? effect_cnt :
+                           (I_mode == 3'b111) ? 3'd7 :
+                           I_mode;
+wire       use_band      = (chosen_effect != 3'd0) && (chosen_effect != 3'd7);
 
 always @(posedge I_clk or posedge I_rst) begin
     if (I_rst) begin
@@ -125,10 +137,11 @@ always @(posedge I_clk or posedge I_rst) begin
         cur_idx      <= 2'd0;
         tgt_idx      <= 2'd0;
         hold_cnt     <= 6'd0;
-        mode_wipe    <= 1'b0;
+        effect_cnt   <= 3'd7;
         dv_d         <= 1'b0;
         O_bot_idx    <= 2'd0;
         O_top_idx    <= 2'd0;
+        O_effect     <= 3'd0;
         O_img_idx    <= 2'd0;
         O_fade_level <= 4'd0;
     end else begin
@@ -137,11 +150,12 @@ always @(posedge I_clk or posedge I_rst) begin
         if (!I_display_valid) begin
             // Nothing committed, or the card was pulled: hold black and abandon
             // any half finished transition so the next commit starts clean.
-            // Equalising the selectors here also stops a running wipe.
+            // Equalising the selectors here also stops a running band effect.
             state        <= ST_IDLE;
             hold_cnt     <= 6'd0;
             O_fade_level <= 4'd0;
             O_top_idx    <= O_bot_idx;
+            O_effect     <= 3'd0;
         end else if (dv_rise) begin
             cur_idx      <= I_disp_idx;
             tgt_idx      <= I_disp_idx;
@@ -149,6 +163,7 @@ always @(posedge I_clk or posedge I_rst) begin
             O_top_idx    <= I_disp_idx;
             O_img_idx    <= I_disp_idx;
             O_fade_level <= 4'd0;
+            O_effect     <= 3'd0;
             hold_cnt     <= 6'd0;
             state        <= ST_FADE_IN;
         end else if (I_frame_start) begin
@@ -157,16 +172,23 @@ always @(posedge I_clk or posedge I_rst) begin
                     if (pending) begin
                         tgt_idx   <= I_disp_idx;
                         hold_cnt  <= 6'd0;
-                        mode_wipe <= ~mode_wipe;
-                        if (use_wipe) begin
-                            // Only the top selector moves. frame_fifo_read
-                            // takes the disagreement as "start a wipe" and
-                            // ramps its boundary from the top of the panel.
+                        if (use_band) begin
+                            // Only the top selector moves, and O_effect carries
+                            // the band code. frame_fifo_read takes the
+                            // disagreement as "start a band sweep" and ramps its
+                            // boundary; select_top turns that ramp plus the code
+                            // into the per-group buffer choice.
+                            O_effect  <= chosen_effect;
                             O_top_idx <= I_disp_idx;
-                            state     <= ST_WIPE;
+                            state     <= ST_BAND;
                         end else begin
+                            O_effect  <= 3'd0;
                             state     <= ST_FADE_OUT;
                         end
+                        // The auto-cycle counter keeps running in every mode,
+                        // 1..7; forced modes ignore it, so advancing is harmless
+                        // and switching back to auto resumes the rotation.
+                        effect_cnt <= (effect_cnt >= 3'd7) ? 3'd1 : (effect_cnt + 3'd1);
                     end
                 end
 
@@ -195,16 +217,18 @@ always @(posedge I_clk or posedge I_rst) begin
                     end
                 end
 
-                ST_WIPE: begin
+                ST_BAND: begin
                     if (hold_cnt >= (WIPE_HOLD - 6'd1)) begin
-                        // The boundary has saturated, the whole panel already
-                        // comes from the top buffer. Equalise: that equality is
-                        // frame_fifo_read's "no wipe" condition and resets its
-                        // group counter on the next frame read.
+                        // The ramp has saturated, the whole panel already comes
+                        // from the top buffer. Equalise the selectors and clear
+                        // the effect code: that equality is frame_fifo_read's
+                        // "no band" condition and resets its engine on the next
+                        // frame read.
                         cur_idx   <= tgt_idx;
                         O_bot_idx <= tgt_idx;
                         O_img_idx <= tgt_idx;
                         hold_cnt  <= 6'd0;
+                        O_effect  <= 3'd0;
                         state     <= ST_WIPE_END;
                     end else begin
                         hold_cnt <= hold_cnt + 6'd1;

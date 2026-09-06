@@ -126,12 +126,53 @@ def sync_audio(audio_path, target_drive):
     print(f"  FPGA 校验: PCM 长度 = 文件字节-44 = {total_len - cw.WAV_HEADER_LEN}")
     return out
 
+def write_existing_wav(wav_path, target_drive):
+    """
+    把一个【已经做好的】标准 WAV 复制到目标盘根目录 MUSIC.WAV，同样保证【先于 BMP】写入。
+
+    与 sync_audio 的区别：sync_audio 需要源 MP3 现场转码；本函数直接复用现成 WAV，
+    用于卡上已有可用 MUSIC.WAV、但手头没有源 MP3 的情况。clean_drive 会先删掉卡上的
+    WAV，所以必须先把旧 WAV 备份到卡外，再用本函数写回。先写 WAV 的两条理由与
+    sync_audio 完全相同：目录项要排在 4 张 BMP 之前才会被 bmp_read 扫到；空卡先写
+    这个大文件才能物理连续。
+    """
+    import struct
+
+    if not os.path.isfile(wav_path):
+        print(f"\n[错误] 找不到 WAV 文件: {wav_path}")
+        return None
+
+    with open(wav_path, 'rb') as f:
+        head = f.read(44)
+    if head[0:4] != b'RIFF' or head[8:12] != b'WAVE':
+        print(f"\n[错误] {wav_path} 不是合法的 RIFF/WAVE 文件")
+        return None
+
+    channels   = struct.unpack('<H', head[22:24])[0]
+    samplerate = struct.unpack('<I', head[24:28])[0]
+    bits       = struct.unpack('<H', head[34:36])[0]
+    pcm_len    = os.path.getsize(wav_path) - 44
+    if (channels, samplerate, bits) != (2, 48000, 16):
+        print(f"  [警告] 非标准格式 {samplerate}Hz/{channels}ch/{bits}bit；"
+              f"FPGA 音频链按 48k/2/16 设计，可能播放异常")
+
+    out = os.path.join(target_drive, "MUSIC.WAV")
+    print(f"\n正在复用现成 WAV 并【先于 BMP】写入...")
+    print(f"  输入: {wav_path}")
+    print(f"  目标: {out}")
+    shutil.copy2(wav_path, out)
+    seconds = pcm_len / (samplerate * channels * (bits // 8))
+    mm, ss = divmod(int(seconds), 60)
+    print(f"  [音频成功] {samplerate}Hz/{channels}ch/{bits}bit  时长 {mm:02d}:{ss:02d}  PCM {pcm_len} 字节")
+    return out
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FPGA SD卡 图片同步工具 (防物理残留死锁版)")
     parser.add_argument('drive', help='SD 卡所在的盘符 (例如: E: 或 E:\\)')
     parser.add_argument('-s', '--source', help='存放转换好 BMP 图片的源文件夹 (默认: 当前目录的 output_bmp)', default=None)
     parser.add_argument('-n', '--num', type=int, default=4, help='最多同步的图片数量 (默认: 4)')
     parser.add_argument('-a', '--audio', help='要播放的音频文件 (如 MP3)。提供则离线转成 MUSIC.WAV 并【先于 BMP】写入卡根目录', default=None)
+    parser.add_argument('-w', '--wav', help='复用【现成的】标准 WAV (48k/2/16)，直接作为 MUSIC.WAV 并【先于 BMP】写入。与 -a 互斥且优先；用于卡上已有可用 WAV 但无源 MP3 的情况', default=None)
     
     args = parser.parse_args()
 
@@ -171,7 +212,9 @@ if __name__ == "__main__":
     clean_drive(target_drive)
     
     # 步骤 3: 若指定了音频，先写 MUSIC.WAV（必须早于 BMP：目录项排序 + 物理连续）
-    if args.audio:
+    if args.wav:
+        write_existing_wav(args.wav, target_drive)
+    elif args.audio:
         sync_audio(args.audio, target_drive)
 
     # 步骤 4: 复制新图片

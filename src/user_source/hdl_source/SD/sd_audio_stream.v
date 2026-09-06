@@ -38,7 +38,15 @@ module sd_audio_stream #(
     // FIFO write side
     output reg         fifo_we,
     output reg  [31:0] fifo_di,         // {R[15:0], L[15:0]}
-    input  wire [8:0]  fifo_wrusedw
+    input  wire [8:0]  fifo_wrusedw,
+
+    // Bring-up visibility. Silence is this module's designed response to both a
+    // missing WAV and a rejected header, and neither raises an error, so these
+    // two go out to the 7-segment display: dbg_ever_we proves PCM actually
+    // reached the FIFO write side, dbg_fault proves the RIFF/WAVE check rejected
+    // whatever sits at wav_start_sector.
+    output reg         dbg_ever_we,
+    output wire        dbg_fault
 );
 
 localparam [1:0] S_IDLE  = 2'd0;
@@ -63,6 +71,7 @@ wire magic_ok = (riff0 == "R") && (riff1 == "I") && (riff2 == "F") && (riff3 == 
                 (wave0 == "W") && (wave1 == "A") && (wave2 == "V") && (wave3 == "E");
 wire wav_usable = (wav_size > (HDR_LEN + 4));
 wire pause_now  = (fifo_wrusedw >= PAUSE_THRESH);
+assign dbg_fault = (state == S_FAULT);
 
 always @(posedge clk or posedge rst) begin
     if (rst) begin
@@ -77,6 +86,7 @@ always @(posedge clk or posedge rst) begin
         hdr_cnt        <= 6'd0;
         byte_phase     <= 2'd0;
         magic_done     <= 1'b0;
+        dbg_ever_we    <= 1'b0;
         riff0 <= 8'd0; riff1 <= 8'd0; riff2 <= 8'd0; riff3 <= 8'd0;
         wave0 <= 8'd0; wave1 <= 8'd0; wave2 <= 8'd0; wave3 <= 8'd0;
         l_lo  <= 8'd0; l_hi  <= 8'd0; r_lo  <= 8'd0;
@@ -139,6 +149,7 @@ always @(posedge clk or posedge rst) begin
                             2'd3: begin
                                 fifo_di    <= {sd_sec_read_data, r_lo, l_hi, l_lo};
                                 fifo_we    <= 1'b1;
+                                dbg_ever_we<= 1'b1;
                                 byte_phase <= 2'd0;
                                 pcm_cnt    <= pcm_cnt + 32'd4;
                             end

@@ -46,6 +46,7 @@ module frame_read_write
 	input[ADDR_BITS - 1:0]           read_addr_3,                // data read module read request base address 1, used when read_addr_index = 3
 	input[1:0]                       read_addr_index,            // select valid base address from read_addr_0 read_addr_1 read_addr_2 read_addr_3
 	input[1:0]                       read_addr_index_top,        // stage 4: selector above the wipe boundary, equal to read_addr_index when idle
+	input[2:0]                       read_effect,                // stage 5: band effect code 1..6 forwarded to frame_fifo_read, 0 when idle
 	input[ADDR_BITS - 1:0]           read_len,                   // data read module read request data length
 	input                            read_en,                    // data read module read request for one data, read_data valid next clock
 	output[READ_DATA_BITS  - 1:0]    read_data,                  // read data
@@ -200,6 +201,7 @@ frame_fifo_read_m0
 	.read_addr_3                (read_addr_3              ),
 	.read_addr_index            (read_addr_index          ),    
 	.read_addr_index_top        (read_addr_index_top      ),
+	.effect                     (read_effect              ),
 	.read_len                   (read_len                 ),
 	.fifo_aclr                  (read_fifo_aclr           ),
 	.wrusedw                	(wrusedw                  )

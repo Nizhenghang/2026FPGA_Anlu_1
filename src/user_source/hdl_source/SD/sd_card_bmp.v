@@ -43,6 +43,31 @@ module sd_card_bmp #(
     output [31:0]               aud_fifo_di,
     input  [8:0]                aud_fifo_wrusedw,
 
+    // Bring-up visibility for a silent audio chain, read by the 7-segment in the
+    // top level. dbg_audio_chain is {wav_found, audio_phase, ever_we, fault}:
+    // the scan saw a WAV, the SD port was handed to the streamer, the streamer
+    // wrote at least one frame, and it rejected the header. dbg_aud_wr_peak is a
+    // sticky high-water mark of aud_fifo_wrusedw[8:5], so a FIFO that filled and
+    // drained again still reads back how full it got.
+    output [3:0]                dbg_audio_chain,
+    output reg [3:0]            dbg_aud_wr_peak,
+
+    // chain == 8 says the hand-off gate never fired, but not which of its
+    // inputs held it off. dbg_gate is {bmp_ready, ~load_busy, scan_done,
+    // display_valid} and dbg_loaded_cnt is img_loaded_count, so one more
+    // readout names the stuck term instead of guessing at it.
+    output [3:0]                dbg_gate,
+    output [3:0]                dbg_loaded_cnt,
+
+    // count < 4 on hardware means the fourth picture never committed, which is
+    // a scan problem (found_cnt < 4) or a load problem (next_idx ran past the
+    // last found entry after the retries gave up). dbg_fail says which load
+    // failure mode fired: bit3 the 1 s no-progress watchdog, bit2 a rejected
+    // header sector, bits1:0 the retry counter at the moment of reading.
+    output [3:0]                dbg_fail,
+    output [3:0]                dbg_found_cnt,
+    output [3:0]                dbg_next_idx,
+
     output                      SD_nCS,
     output                      SD_DCLK,
     output                      SD_MOSI,
@@ -66,6 +91,8 @@ wire             bmp_sd_sec_read;
 wire [31:0]      bmp_sd_sec_read_addr;
 wire             aud_sd_sec_read;
 wire [31:0]      aud_sd_sec_read_addr;
+wire             aud_dbg_ever_we;
+wire             aud_dbg_fault;
 wire             bmp_data_wr_en;
 wire [23:0]      bmp_data;
 wire [15:0]      bmp_src_width;
@@ -117,6 +144,8 @@ reg              wav_found;
 reg [31:0]       wav_sector;
 reg [31:0]       wav_size;
 reg              audio_phase;
+reg              dbg_stall_seen;
+reg              dbg_hdr_seen;
 
 reg [2:0]        wrfin_tgl_sync;
 wire             write_finish_pulse;
@@ -140,6 +169,12 @@ assign write_data = {scaler_dst_pixel, 8'b0};
 // SD sector-read port ownership: pictures first, music after they are all in.
 assign sd_sec_read      = audio_phase ? aud_sd_sec_read      : bmp_sd_sec_read;
 assign sd_sec_read_addr = audio_phase ? aud_sd_sec_read_addr : bmp_sd_sec_read_addr;
+assign dbg_audio_chain  = {wav_found, audio_phase, aud_dbg_ever_we, aud_dbg_fault};
+assign dbg_gate         = {bmp_ready, ~load_busy, scan_done, display_valid};
+assign dbg_loaded_cnt   = {1'b0, img_loaded_count};
+assign dbg_fail         = {dbg_stall_seen, dbg_hdr_seen, load_retry_cnt[1:0]};
+assign dbg_found_cnt    = {1'b0, img_found_count};
+assign dbg_next_idx     = {1'b0, next_load_idx};
 assign auto_tick  = (auto_cnt == (CLK_FREQ_HZ - 1));
 assign next_from_loaded = next_index_limited(img_idx, img_loaded_count);
 assign write_finish_pulse = wrfin_tgl_sync[2] ^ wrfin_tgl_sync[1];
@@ -249,6 +284,8 @@ always @(posedge clk or posedge rst) begin
         wav_sector            <= 32'd0;
         wav_size              <= 32'd0;
         audio_phase           <= 1'b0;
+        dbg_stall_seen        <= 1'b0;
+        dbg_hdr_seen          <= 1'b0;
     end else begin
         wrfin_tgl_sync   <= {wrfin_tgl_sync[1:0], write_finish_toggle};
         scan_start_pulse <= 1'b0;
@@ -285,6 +322,8 @@ always @(posedge clk or posedge rst) begin
             wav_sector            <= 32'd0;
             wav_size              <= 32'd0;
             audio_phase           <= 1'b0;
+            dbg_stall_seen        <= 1'b0;
+            dbg_hdr_seen          <= 1'b0;
         end else begin
             if (scan_found_valid) begin
                 case (img_found_count)
@@ -326,6 +365,8 @@ always @(posedge clk or posedge rst) begin
                 // bmp_read rejected the header sector, or the picture stopped
                 // moving for a whole second. Either way this attempt left
                 // nothing worth keeping in the frame buffer.
+                if (load_stall_hit) dbg_stall_seen <= 1'b1;
+                if (load_failed)    dbg_hdr_seen   <= 1'b1;
                 load_busy        <= 1'b0;
                 source_done_seen <= 1'b0;
                 write_done_seen  <= 1'b0;
@@ -525,6 +566,17 @@ scaler_nn #(
     .o_overflow             ()
 );
 
+// Sticky high-water mark of the audio FIFO write side. The streamer refills in
+// 128-word sectors and the read side drains at 48 kHz, so the live occupancy is
+// useless on a 200 Hz multiplexed display; the peak is not. Zero here means not
+// one frame ever reached the FIFO.
+always @(posedge clk or posedge rst) begin
+    if (rst)
+        dbg_aud_wr_peak <= 4'd0;
+    else if (aud_fifo_wrusedw[8:5] > dbg_aud_wr_peak)
+        dbg_aud_wr_peak <= aud_fifo_wrusedw[8:5];
+end
+
 // Music streamer. Shares the SD sector-read port with bmp_read via the mux
 // above; start is the sticky audio_phase level, so it begins only after the
 // last picture is committed and then loops the single track forever. Its FIFO
@@ -546,7 +598,9 @@ sd_audio_stream #(
     .sd_sec_read_end        (sd_sec_read_end),
     .fifo_we                (aud_fifo_we),
     .fifo_di                (aud_fifo_di),
-    .fifo_wrusedw           (aud_fifo_wrusedw)
+    .fifo_wrusedw           (aud_fifo_wrusedw),
+    .dbg_ever_we            (aud_dbg_ever_we),
+    .dbg_fault              (aud_dbg_fault)
 );
 
 sd_card_top sd_card_top_m0(
