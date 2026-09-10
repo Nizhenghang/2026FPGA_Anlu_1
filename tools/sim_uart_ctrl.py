@@ -1,0 +1,752 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+sim_uart_ctrl.py -- cycle-accurate model of the Stage 1 串口屏 control path.
+
+Why this exists
+---------------
+There is no Verilog simulator on this machine (see the project memory
+"no-verilog-simulator-use-python-models"), so every RTL change is proven with a
+cycle-accurate Python model before it goes anywhere near the board. This file
+models the exact non-blocking behaviour of the three clock domains touched by
+the serial-screen feature:
+
+  * clk        (50 MHz)  -- uart_screen_ctrl RX FSM + TJC parser, the
+                            mode/marquee override latch, the command->toggle
+                            generator, and the brightness merge.
+  * sd_card_clk(100 MHz) -- the toggle-CDC synchroniser chain that rebuilds
+                            single-cycle cmd_*_pulse_sd pulses for sd_card_bmp.
+  * video_clk  (25 MHz)  -- the 2FF synchroniser that carries the override
+                            levels into the trans_mode / marquee_en muxes.
+
+The three clocks are run on one merged time axis with deliberate phase offsets
+(clk at t=0 mod 20ns, sd_card_clk at t=3 mod 10ns, video_clk at t=7 mod 40ns)
+so no two posedges ever coincide. That makes the CDC sampling realistic: a
+toggle flipped in the clk domain is captured by sd_card_clk on a genuinely
+asynchronous edge, exactly like hardware.
+
+What it verifies (passes A-E)
+-----------------------------
+  A. RX byte decode at the real divider (CLKS_PER_BIT = 50e6/9600 = 5208):
+     a "NEXT" frame arrives as the exact 7 bytes on the wire.
+  B. Parser command effects for all seven commands, plus the exact-length /
+     digit-range guards (MODE 8, BRGT 5, IMGX 0, IMGX 5 must NOT fire).
+  C. Toggle-CDC: every clk-domain command produces exactly ONE sd_card_clk
+     pulse (no loss, no double), and IMGX carries the right 2-bit value.
+  D. Override mux + brightness merge:
+       - no screen command  -> trans_mode == ~sw and marquee_en == sw4,
+                               bit-identical to the verified baseline;
+       - MODE n / MARQ n    -> override wins;
+       - physical sw change -> override cleared, physical path reclaims;
+       - BRGT / BRUP / key3 -> brightness set, cycle-wrap, and OR-merge.
+  E. Negative controls (the project mandates these):
+       - only two 0xFF       -> no dispatch;
+       - unknown keyword     -> no effect;
+       - "NEXTX" (clen==5)   -> rejected by the exact-length guard;
+       - half frame "MO"+FFF then a valid "NEXT" -> no false fire, later works;
+       - full retreat: zero commands ever sent -> outputs track sw exactly and
+         not one spurious pulse is emitted.
+
+Honest limits
+-------------
+  * Passes B-E shrink CLKS_PER_BIT to 16 to run fast. The RX FSM and parser are
+     parameter-independent (CPB only sets bit width; a constant 2-cycle
+     synchroniser latency shifts every sample point uniformly and stays inside
+     each bit window for any CPB > 4), so this is a legitimate speed-up. Pass A
+     re-runs the real 5208 divider end-to-end to prove it.
+  * The OR-merge inside sd_card_bmp (key_next_press || cmd_next_pulse) and the
+     img_loaded_count gate on IMGX are NOT modelled end-to-end -- this harness
+     proves the pulses and values that FEED that logic are correct, which is the
+     CDC-sensitive part. The OR itself is a one-line `||`.
+  * The physical key debouncers (key_press_debounce) are not modelled; key3 is
+     injected directly as a clk-domain pulse to exercise the brightness merge.
+
+Usage
+-----
+    python tools/sim_uart_ctrl.py            # run all passes, print PASS/FAIL
+    python tools/sim_uart_ctrl.py --verbose  # extra per-command tracing
+Exit code is 0 on success, 1 if any check fails.
+"""
+
+import argparse
+import sys
+
+# ---------------------------------------------------------------------------
+# clock geometry (nanoseconds). Offsets guarantee no two posedges coincide.
+# ---------------------------------------------------------------------------
+CLK_PERIOD = 20      # 50 MHz
+SD_PERIOD = 10       # 100 MHz
+VID_PERIOD = 40      # 25 MHz
+CLK_OFF = 0
+SD_OFF = 3
+VID_OFF = 7
+
+RX_IDLE, RX_START, RX_DATA, RX_STOP = 0, 1, 2, 3
+CPB_FAST = 16                 # shrunk divider for the fast passes
+CPB_REAL = 50_000_000 // 9600  # 5208, what actually ships
+
+
+def frame(cmd_str):
+    """ASCII bytes of a command + the TJC three-byte terminator."""
+    return [ord(c) for c in cmd_str] + [0xFF, 0xFF, 0xFF]
+
+
+def build_rx_wave(byte_list, cpb, idle_before=8, idle_between=2, idle_after=48):
+    """
+    Expand a byte list into per-clk-cycle uart_rx pin levels: idle high, then
+    for each byte a low start bit, 8 LSB-first data bits, a high stop bit (each
+    cpb clk cycles wide), with idle gaps between bytes and at the end.
+    """
+    segs = [(1, idle_before)]
+    for i, b in enumerate(byte_list):
+        segs.append((0, cpb))                       # start bit
+        for k in range(8):
+            segs.append(((b >> k) & 1, cpb))        # data bits, LSB first
+        segs.append((1, cpb))                       # stop bit
+        if i != len(byte_list) - 1:
+            segs.append((1, idle_between))
+    segs.append((1, idle_after))
+    levels = []
+    for lvl, n in segs:
+        levels.extend([lvl] * n)
+    return levels
+
+
+class System(object):
+    """Mirrors every register of the three clock domains in the RTL."""
+
+    def __init__(self, cpb=CPB_FAST, sw=0xF):
+        self.cpb = cpb
+        self.sw = sw                # physical DIP: sw[2:0]=SW1-3, sw[3]=SW4
+        self.key3_press = 0         # one-shot clk-domain pulse (injectable)
+        self.rx_levels = []
+        self.clk_n = 0
+        self.sd_n = 0
+        self.vid_n = 0
+        self.st = self._reset_state()
+        self.log = {'next': 0, 'auto': 0, 'bright_cycle': 0,
+                    'bright_set': [], 'mode_set': [], 'marquee_set': [],
+                    'img_set': [], 'rx': []}
+        self.sdlog = {'next': 0, 'auto': 0, 'img': 0, 'img_vals': []}
+
+    @staticmethod
+    def _reset_state():
+        s = {}
+        # --- clk domain: uart_screen_ctrl RX ---
+        s['rx_sync'] = 0b11
+        s['rx_state'] = RX_IDLE
+        s['rx_cnt'] = 0
+        s['rx_bit'] = 0
+        s['rx_shift'] = 0
+        s['rx_byte'] = 0
+        s['rx_valid'] = 0
+        # --- clk domain: parser ---
+        s['c0'] = s['c1'] = s['c2'] = s['c3'] = s['c4'] = s['c5'] = 0
+        s['clen'] = 0
+        s['ffc'] = 0
+        s['cmd_next_pulse'] = 0
+        s['cmd_auto_pulse'] = 0
+        s['cmd_bright_cycle_pulse'] = 0
+        s['cmd_bright_set'] = 0
+        s['cmd_bright_set_v'] = 0
+        s['cmd_mode'] = 0
+        s['cmd_mode_set'] = 0
+        s['cmd_marquee'] = 0
+        s['cmd_marquee_set'] = 0
+        s['cmd_img_sel'] = 0
+        s['cmd_img_sel_set'] = 0
+        # --- clk domain: brightness + override latch + toggle gen ---
+        s['brightness'] = 2
+        s['sw_c0'] = s['sw_c1'] = s['sw_c2'] = 7
+        s['sw4_c0'] = s['sw4_c1'] = s['sw4_c2'] = 1
+        s['mode_ovr_val'] = 0
+        s['mode_ovr_en'] = 0
+        s['marq_ovr_val'] = 1
+        s['marq_ovr_en'] = 0
+        s['next_tgl'] = 0
+        s['auto_tgl'] = 0
+        s['img_tgl'] = 0
+        s['img_sel_lat'] = 0
+        # --- sd_card_clk domain ---
+        s['next_tgl_s0'] = s['next_tgl_s1'] = s['next_tgl_s2'] = 0
+        s['auto_tgl_s0'] = s['auto_tgl_s1'] = s['auto_tgl_s2'] = 0
+        s['img_tgl_s0'] = s['img_tgl_s1'] = s['img_tgl_s2'] = 0
+        s['img_sel_s0'] = s['img_sel_s1'] = 0
+        # --- video_clk domain ---
+        s['sw_v0'] = s['sw_v1'] = 7
+        s['sw4_v0'] = s['sw4_v1'] = 1
+        s['mode_ovr_val_v0'] = s['mode_ovr_val_v1'] = 0
+        s['mode_ovr_en_v0'] = s['mode_ovr_en_v1'] = 0
+        s['marq_ovr_val_v0'] = s['marq_ovr_val_v1'] = 1
+        s['marq_ovr_en_v0'] = s['marq_ovr_en_v1'] = 0
+        return s
+
+    # -- combinational outputs -------------------------------------------
+    def trans_mode(self):
+        return self.st['mode_ovr_val_v1'] if self.st['mode_ovr_en_v1'] \
+            else ((~self.st['sw_v1']) & 7)
+
+    def marquee_en(self):
+        return self.st['marq_ovr_val_v1'] if self.st['marq_ovr_en_v1'] \
+            else self.st['sw4_v1']
+
+    def cmd_next_pulse_sd(self):
+        return self.st['next_tgl_s1'] ^ self.st['next_tgl_s2']
+
+    def cmd_auto_pulse_sd(self):
+        return self.st['auto_tgl_s1'] ^ self.st['auto_tgl_s2']
+
+    def cmd_img_sel_pulse_sd(self):
+        return self.st['img_tgl_s1'] ^ self.st['img_tgl_s2']
+
+    # -- clock-edge handlers (non-blocking: read old, write nxt) ---------
+    def _do_clk(self):
+        s = self.st
+        n = self.clk_n
+        rx_pin = self.rx_levels[n] if n < len(self.rx_levels) else 1
+        nxt = {}
+
+        # ---- RX FSM ----
+        rx_in = (s['rx_sync'] >> 1) & 1
+        nxt['rx_sync'] = ((s['rx_sync'] & 1) << 1) | rx_pin
+        rx_state_n, rx_cnt_n = s['rx_state'], s['rx_cnt']
+        rx_bit_n, rx_shift_n = s['rx_bit'], s['rx_shift']
+        rx_byte_n, rx_valid_n = s['rx_byte'], 0
+        cpb = self.cpb
+        if s['rx_state'] == RX_IDLE:
+            rx_cnt_n, rx_bit_n = 0, 0
+            if rx_in == 0:
+                rx_state_n = RX_START
+        elif s['rx_state'] == RX_START:
+            if s['rx_cnt'] == (cpb - 1) // 2:
+                if rx_in == 0:
+                    rx_cnt_n, rx_state_n = 0, RX_DATA
+                else:
+                    rx_state_n = RX_IDLE
+            else:
+                rx_cnt_n = s['rx_cnt'] + 1
+        elif s['rx_state'] == RX_DATA:
+            if s['rx_cnt'] == cpb - 1:
+                rx_cnt_n = 0
+                rx_shift_n = ((rx_in << 7) | (s['rx_shift'] >> 1)) & 0xFF
+                rx_bit_n = (s['rx_bit'] + 1) & 7
+                if s['rx_bit'] == 7:
+                    rx_state_n = RX_STOP
+            else:
+                rx_cnt_n = s['rx_cnt'] + 1
+        elif s['rx_state'] == RX_STOP:
+            if s['rx_cnt'] == cpb - 1:
+                rx_cnt_n, rx_state_n = 0, RX_IDLE
+                if rx_in == 1:
+                    rx_byte_n, rx_valid_n = s['rx_shift'], 1
+            else:
+                rx_cnt_n = s['rx_cnt'] + 1
+        nxt['rx_state'] = rx_state_n
+        nxt['rx_cnt'] = rx_cnt_n & 0xFFFF
+        nxt['rx_bit'] = rx_bit_n
+        nxt['rx_shift'] = rx_shift_n
+        nxt['rx_byte'] = rx_byte_n
+        nxt['rx_valid'] = rx_valid_n
+
+        # ---- parser (consumes the OLD rx_valid / rx_byte) ----
+        for k in ('cmd_next_pulse', 'cmd_auto_pulse', 'cmd_bright_cycle_pulse',
+                  'cmd_bright_set_v', 'cmd_mode_set', 'cmd_marquee_set',
+                  'cmd_img_sel_set'):
+            nxt[k] = 0
+        nxt['cmd_bright_set'] = s['cmd_bright_set']
+        nxt['cmd_mode'] = s['cmd_mode']
+        nxt['cmd_marquee'] = s['cmd_marquee']
+        nxt['cmd_img_sel'] = s['cmd_img_sel']
+        for k in ('c0', 'c1', 'c2', 'c3', 'c4', 'c5'):
+            nxt[k] = s[k]
+        nxt['clen'] = s['clen']
+        nxt['ffc'] = s['ffc']
+
+        if s['rx_valid']:
+            b = s['rx_byte']
+            if b == 0xFF:
+                if s['ffc'] == 2:
+                    nxt['ffc'] = 0
+                    nxt['clen'] = 0
+                    key = bytes([s['c0'], s['c1'], s['c2'], s['c3']])
+                    clen, c4, c5 = s['clen'], s['c4'], s['c5']
+                    if key == b"NEXT" and clen == 4:
+                        nxt['cmd_next_pulse'] = 1
+                    elif key == b"AUTO" and clen == 4:
+                        nxt['cmd_auto_pulse'] = 1
+                    elif key == b"BRUP" and clen == 4:
+                        nxt['cmd_bright_cycle_pulse'] = 1
+                    elif key == b"BRGT" and clen == 6 and c4 == 0x20 \
+                            and 0x30 <= c5 <= 0x34:
+                        nxt['cmd_bright_set'] = c5 - 0x30
+                        nxt['cmd_bright_set_v'] = 1
+                    elif key == b"MODE" and clen == 6 and c4 == 0x20 \
+                            and 0x30 <= c5 <= 0x37:
+                        nxt['cmd_mode'] = c5 - 0x30
+                        nxt['cmd_mode_set'] = 1
+                    elif key == b"MARQ" and clen == 6 and c4 == 0x20 \
+                            and c5 in (0x30, 0x31):
+                        nxt['cmd_marquee'] = 1 if c5 == 0x31 else 0
+                        nxt['cmd_marquee_set'] = 1
+                    elif key == b"IMGX" and clen == 6 and c4 == 0x20 \
+                            and 0x31 <= c5 <= 0x34:
+                        nxt['cmd_img_sel'] = (c5 - 0x30 - 1) & 3
+                        nxt['cmd_img_sel_set'] = 1
+                else:
+                    nxt['ffc'] = (s['ffc'] + 1) & 3
+            else:
+                nxt['ffc'] = 0
+                if s['clen'] < 6:
+                    nxt['c%d' % s['clen']] = b
+                if s['clen'] < 15:
+                    nxt['clen'] = s['clen'] + 1
+
+        # ---- override latch (OLD cmd_*_set, OLD sw_c*, live sw) ----
+        nxt['sw_c0'] = self.sw & 7
+        nxt['sw_c1'] = s['sw_c0']
+        nxt['sw_c2'] = s['sw_c1']
+        nxt['sw4_c0'] = (self.sw >> 3) & 1
+        nxt['sw4_c1'] = s['sw4_c0']
+        nxt['sw4_c2'] = s['sw4_c1']
+        nxt['mode_ovr_val'] = s['mode_ovr_val']
+        nxt['mode_ovr_en'] = s['mode_ovr_en']
+        nxt['marq_ovr_val'] = s['marq_ovr_val']
+        nxt['marq_ovr_en'] = s['marq_ovr_en']
+        if s['cmd_mode_set']:
+            nxt['mode_ovr_val'] = s['cmd_mode']
+            nxt['mode_ovr_en'] = 1
+        elif s['sw_c1'] != s['sw_c2']:
+            nxt['mode_ovr_en'] = 0
+        if s['cmd_marquee_set']:
+            nxt['marq_ovr_val'] = s['cmd_marquee']
+            nxt['marq_ovr_en'] = 1
+        elif s['sw4_c1'] != s['sw4_c2']:
+            nxt['marq_ovr_en'] = 0
+
+        # ---- toggle generator (OLD cmd pulses) ----
+        nxt['next_tgl'] = s['next_tgl']
+        nxt['auto_tgl'] = s['auto_tgl']
+        nxt['img_tgl'] = s['img_tgl']
+        nxt['img_sel_lat'] = s['img_sel_lat']
+        if s['cmd_next_pulse']:
+            nxt['next_tgl'] = 1 - s['next_tgl']
+        if s['cmd_auto_pulse']:
+            nxt['auto_tgl'] = 1 - s['auto_tgl']
+        if s['cmd_img_sel_set']:
+            nxt['img_sel_lat'] = s['cmd_img_sel']
+            nxt['img_tgl'] = 1 - s['img_tgl']
+
+        # ---- brightness merge (OLD strobes, live key3) ----
+        bright_n = s['brightness']
+        if s['cmd_bright_set_v']:
+            bright_n = s['cmd_bright_set']
+        elif self.key3_press or s['cmd_bright_cycle_pulse']:
+            bright_n = 0 if s['brightness'] == 4 else s['brightness'] + 1
+        nxt['brightness'] = bright_n
+
+        # ---- commit ----
+        s.update(nxt)
+        self.key3_press = 0     # consume the one-shot
+
+        # ---- record effects from the committed values ----
+        if nxt['rx_valid']:
+            self.log['rx'].append(nxt['rx_byte'])
+        if nxt['cmd_next_pulse']:
+            self.log['next'] += 1
+        if nxt['cmd_auto_pulse']:
+            self.log['auto'] += 1
+        if nxt['cmd_bright_cycle_pulse']:
+            self.log['bright_cycle'] += 1
+        if nxt['cmd_bright_set_v']:
+            self.log['bright_set'].append(nxt['cmd_bright_set'])
+        if nxt['cmd_mode_set']:
+            self.log['mode_set'].append(nxt['cmd_mode'])
+        if nxt['cmd_marquee_set']:
+            self.log['marquee_set'].append(nxt['cmd_marquee'])
+        if nxt['cmd_img_sel_set']:
+            self.log['img_set'].append(nxt['cmd_img_sel'])
+
+    def _do_sd(self):
+        s = self.st
+        # detect pulses from the PRE-edge s1^s2 (what sd_card_bmp would see)
+        if s['next_tgl_s1'] ^ s['next_tgl_s2']:
+            self.sdlog['next'] += 1
+        if s['auto_tgl_s1'] ^ s['auto_tgl_s2']:
+            self.sdlog['auto'] += 1
+        if s['img_tgl_s1'] ^ s['img_tgl_s2']:
+            self.sdlog['img'] += 1
+            self.sdlog['img_vals'].append(s['img_sel_s1'])
+        nxt = {
+            'next_tgl_s0': s['next_tgl'], 'next_tgl_s1': s['next_tgl_s0'],
+            'next_tgl_s2': s['next_tgl_s1'],
+            'auto_tgl_s0': s['auto_tgl'], 'auto_tgl_s1': s['auto_tgl_s0'],
+            'auto_tgl_s2': s['auto_tgl_s1'],
+            'img_tgl_s0': s['img_tgl'], 'img_tgl_s1': s['img_tgl_s0'],
+            'img_tgl_s2': s['img_tgl_s1'],
+            'img_sel_s0': s['img_sel_lat'], 'img_sel_s1': s['img_sel_s0'],
+        }
+        s.update(nxt)
+
+    def _do_vid(self):
+        s = self.st
+        nxt = {
+            'sw_v0': self.sw & 7, 'sw_v1': s['sw_v0'],
+            'sw4_v0': (self.sw >> 3) & 1, 'sw4_v1': s['sw4_v0'],
+            'mode_ovr_val_v0': s['mode_ovr_val'],
+            'mode_ovr_val_v1': s['mode_ovr_val_v0'],
+            'mode_ovr_en_v0': s['mode_ovr_en'],
+            'mode_ovr_en_v1': s['mode_ovr_en_v0'],
+            'marq_ovr_val_v0': s['marq_ovr_val'],
+            'marq_ovr_val_v1': s['marq_ovr_val_v0'],
+            'marq_ovr_en_v0': s['marq_ovr_en'],
+            'marq_ovr_en_v1': s['marq_ovr_en_v0'],
+        }
+        s.update(nxt)
+
+    # -- time advance ----------------------------------------------------
+    def run_clk(self, target_n):
+        """Process edges in strict time order until clk_n reaches target_n."""
+        while self.clk_n < target_n:
+            tc = CLK_OFF + CLK_PERIOD * self.clk_n
+            ts = SD_OFF + SD_PERIOD * self.sd_n
+            tv = VID_OFF + VID_PERIOD * self.vid_n
+            m = min(tc, ts, tv)
+            if m == tc:
+                self._do_clk(); self.clk_n += 1
+            elif m == ts:
+                self._do_sd(); self.sd_n += 1
+            else:
+                self._do_vid(); self.vid_n += 1
+
+    def send(self, byte_list, cpb=None, extra=120):
+        """Push a frame onto the wire and run enough cycles to fully drain it."""
+        if cpb is None:
+            cpb = self.cpb
+        # rx_levels is indexed by absolute clk cycle. If settle()/a prior frame
+        # already advanced clk_n past the end of the wire, pad with idle-high so
+        # the new frame's start bit lands exactly on the next clk edge -- else
+        # the RX FSM would sample the middle of the wave and miss it.
+        while len(self.rx_levels) < self.clk_n:
+            self.rx_levels.append(1)
+        self.rx_levels.extend(build_rx_wave(byte_list, cpb))
+        self.run_clk(len(self.rx_levels) + extra)
+
+    def settle(self, cycles=40):
+        """Run idle clk cycles (line stays high) to let CDC chains resolve."""
+        self.run_clk(self.clk_n + cycles)
+
+
+class Result(object):
+    def __init__(self):
+        self.rows = []
+        self.failed = 0
+
+    def add(self, ok, name, detail):
+        self.rows.append((ok, name, detail))
+        if not ok:
+            self.failed += 1
+        print("  [%s] %-46s %s" % ("PASS" if ok else "FAIL", name, detail))
+
+
+# ---------------------------------------------------------------------------
+# Pass A -- real divider byte decode
+# ---------------------------------------------------------------------------
+def pass_a(res, verbose):
+    print("=" * 78)
+    print("A. RX decode at the real divider CLKS_PER_BIT = %d (50 MHz / 9600)" % CPB_REAL)
+    print("=" * 78)
+    sysA = System(cpb=CPB_REAL)
+    sysA.send(frame("NEXT"), extra=200)
+    want = frame("NEXT")
+    got = sysA.log['rx']
+    res.add(got == want, "real-CPB byte stream",
+            "decoded %d bytes %s" % (len(got), got))
+    res.add(sysA.log['next'] == 1 and sysA.sdlog['next'] == 1,
+            "real-CPB NEXT -> 1 clk + 1 sd pulse",
+            "clk next=%d, sd next=%d" % (sysA.log['next'], sysA.sdlog['next']))
+    if verbose:
+        print("      rx bytes:", got)
+
+
+# ---------------------------------------------------------------------------
+# Pass B -- parser command effects and guards
+# ---------------------------------------------------------------------------
+def pass_b(res, verbose):
+    print("=" * 78)
+    print("B. Parser command effects (cpb=%d)" % CPB_FAST)
+    print("=" * 78)
+
+    # (frame, expected log key, expected value or None for pulse-count==1)
+    pulse_cases = [
+        ("NEXT", 'next'),
+        ("AUTO", 'auto'),
+        ("BRUP", 'bright_cycle'),
+    ]
+    for cmd, key in pulse_cases:
+        s = System()
+        s.send(frame(cmd))
+        fired = s.log[key] == 1
+        others = sum(v for k, v in s.log.items()
+                     if k in ('next', 'auto', 'bright_cycle') and k != key)
+        res.add(fired and others == 0, "%s fires once, nothing else" % cmd,
+                "%s=%d, other pulses=%d" % (key, s.log[key], others))
+
+    value_cases = [
+        ("BRGT 3", 'bright_set', [3]),
+        ("MODE 5", 'mode_set', [5]),
+        ("MARQ 0", 'marquee_set', [0]),
+        ("MARQ 1", 'marquee_set', [1]),
+        ("IMGX 2", 'img_set', [1]),      # picture 2 -> index 1
+        ("IMGX 4", 'img_set', [3]),
+    ]
+    for cmd, key, want in value_cases:
+        s = System()
+        s.send(frame(cmd))
+        res.add(s.log[key] == want, "%s -> %s=%s" % (cmd, key, want),
+                "got %s" % s.log[key])
+
+    # guards: out-of-range digits and wrong lengths must NOT fire
+    guard_cases = [
+        ("MODE 8", 'mode_set', "digit >7 rejected"),
+        ("BRGT 5", 'bright_set', "digit >4 rejected"),
+        ("IMGX 0", 'img_set', "digit <1 rejected"),
+        ("IMGX 5", 'img_set', "digit >4 rejected"),
+        ("MODE 33", 'mode_set', "two-digit arg -> clen==7 rejected"),
+    ]
+    for cmd, key, why in guard_cases:
+        s = System()
+        s.send(frame(cmd))
+        res.add(len(s.log[key]) == 0, "%s silent (%s)" % (cmd, why),
+                "%s=%s" % (key, s.log[key]))
+
+    # brightness set actually lands in the register
+    s = System()
+    s.send(frame("BRGT 4"))
+    res.add(s.st['brightness'] == 4, "BRGT 4 sets brightness_level",
+            "brightness=%d" % s.st['brightness'])
+    if verbose:
+        print("      guard cases all silent as expected")
+
+
+# ---------------------------------------------------------------------------
+# Pass C -- toggle-CDC: exactly one sd pulse per command, correct img value
+# ---------------------------------------------------------------------------
+def pass_c(res, verbose):
+    print("=" * 78)
+    print("C. Toggle-CDC clk -> sd_card_clk (exactly one pulse, no loss/double)")
+    print("=" * 78)
+
+    s = System()
+    s.send(frame("NEXT"))
+    s.send(frame("NEXT"))
+    s.send(frame("NEXT"))
+    res.add(s.log['next'] == 3 and s.sdlog['next'] == 3,
+            "3x NEXT -> 3 clk, 3 sd pulses",
+            "clk=%d sd=%d" % (s.log['next'], s.sdlog['next']))
+
+    s = System()
+    s.send(frame("AUTO"))
+    s.send(frame("AUTO"))
+    res.add(s.log['auto'] == 2 and s.sdlog['auto'] == 2,
+            "2x AUTO -> 2 sd pulses",
+            "clk=%d sd=%d" % (s.log['auto'], s.sdlog['auto']))
+
+    s = System()
+    for n, idx in (("IMGX 1", 0), ("IMGX 3", 2), ("IMGX 4", 3)):
+        s.send(frame(n))
+    res.add(s.sdlog['img'] == 3 and s.sdlog['img_vals'] == [0, 2, 3],
+            "IMGX 1/3/4 -> sd img_vals [0,2,3]",
+            "count=%d vals=%s" % (s.sdlog['img'], s.sdlog['img_vals']))
+
+    # a command must never leak a pulse onto a different channel
+    s = System()
+    s.send(frame("MODE 2"))
+    s.settle()
+    res.add(s.sdlog['next'] == 0 and s.sdlog['auto'] == 0 and s.sdlog['img'] == 0,
+            "MODE leaks no sd pulse",
+            "next=%d auto=%d img=%d" % (s.sdlog['next'], s.sdlog['auto'], s.sdlog['img']))
+    if verbose:
+        print("      img_vals:", s.sdlog['img_vals'])
+
+
+# ---------------------------------------------------------------------------
+# Pass D -- override mux + brightness merge + physical reclaim
+# ---------------------------------------------------------------------------
+def pass_d(res, verbose):
+    print("=" * 78)
+    print("D. trans_mode / marquee_en override mux, brightness merge")
+    print("=" * 78)
+
+    # no command: trans_mode == ~sw across the whole switch range
+    ok = True
+    detail = []
+    for v in range(8):
+        s = System(sw=(v | 0b1000))    # sw[3]=1 (SW4 OFF), sw[2:0]=v
+        s.settle(60)
+        tm = s.trans_mode()
+        want = (~v) & 7
+        detail.append("%d->%d" % (v, tm))
+        if tm != want:
+            ok = False
+    res.add(ok, "no cmd: trans_mode == ~sw (all 8)", " ".join(detail))
+
+    # no command: marquee_en == sw4
+    ok = True
+    detail = []
+    for sw4 in (0, 1):
+        s = System(sw=(0b111 | (sw4 << 3)))
+        s.settle(60)
+        me = s.marquee_en()
+        detail.append("sw4=%d->%d" % (sw4, me))
+        if me != sw4:
+            ok = False
+    res.add(ok, "no cmd: marquee_en == sw4", " ".join(detail))
+
+    # MODE n overrides, and survives while sw is held still
+    s = System(sw=0xF)
+    s.settle(40)
+    s.send(frame("MODE 3"))
+    s.settle(60)
+    res.add(s.trans_mode() == 3, "MODE 3 overrides ~sw",
+            "trans_mode=%d (sw held 111, ~sw would be 0)" % s.trans_mode())
+
+    # MARQ 0 overrides
+    s = System(sw=0xF)          # sw4=1 -> marquee shown by default
+    s.settle(40)
+    s.send(frame("MARQ 0"))
+    s.settle(60)
+    res.add(s.marquee_en() == 0, "MARQ 0 hides banner over sw4=1",
+            "marquee_en=%d" % s.marquee_en())
+
+    # physical sw change reclaims control from the override
+    s = System(sw=0xF)
+    s.settle(40)
+    s.send(frame("MODE 3"))
+    s.settle(60)
+    pre = s.trans_mode()
+    s.sw = 0b1001               # sw[2:0] 7 -> 1, a real DIP movement
+    s.settle(60)
+    post = s.trans_mode()
+    res.add(pre == 3 and post == ((~1) & 7),
+            "DIP move clears override, ~sw reclaims",
+            "before=%d after=%d (want 6)" % (pre, post))
+
+    # same for marquee, and prove the override is truly gone afterwards
+    s = System(sw=0xF)
+    s.settle(40)
+    s.send(frame("MARQ 0"))
+    s.settle(60)
+    pre = s.marquee_en()                  # override hides banner while sw4=1
+    en_before = s.st['marq_ovr_en_v1']
+    s.sw = 0b0111                         # sw[3] 1 -> 0, physical SW4 flip
+    s.settle(60)
+    en_after = s.st['marq_ovr_en_v1']     # override must be cleared now
+    s.sw = 0xF                            # flip SW4 back 0 -> 1
+    s.settle(60)
+    tracks = s.marquee_en()               # must follow physical (=1), not stale 0
+    res.add(pre == 0 and en_before == 1 and en_after == 0 and tracks == 1,
+            "SW4 flip clears marquee override, physical reclaims",
+            "pre=%d ovr_en %d->%d, after flip-back marquee_en=%d (want 1)"
+            % (pre, en_before, en_after, tracks))
+
+    # brightness: BRUP wraps 4->0, key3 OR-merges, BRGT priority
+    s = System()
+    s.send(frame("BRGT 4"))
+    b4 = s.st['brightness']
+    s.send(frame("BRUP"))
+    bwrap = s.st['brightness']
+    s.key3_press = 1
+    s.settle(1)
+    bkey = s.st['brightness']
+    res.add(b4 == 4 and bwrap == 0 and bkey == 1,
+            "brightness: set 4, BRUP wraps to 0, key3 -> 1",
+            "after BRGT4=%d after BRUP=%d after key3=%d" % (b4, bwrap, bkey))
+    if verbose:
+        print("      override + reclaim verified")
+
+
+# ---------------------------------------------------------------------------
+# Pass E -- negative controls and full retreat
+# ---------------------------------------------------------------------------
+def pass_e(res, verbose):
+    print("=" * 78)
+    print("E. Negative controls + retreat (no command == baseline)")
+    print("=" * 78)
+
+    # only two 0xFF -> never dispatch
+    s = System()
+    s.send([ord(c) for c in "NEXT"] + [0xFF, 0xFF])
+    s.settle(80)
+    res.add(s.log['next'] == 0 and s.sdlog['next'] == 0,
+            "two 0xFF only -> no dispatch",
+            "clk next=%d sd next=%d" % (s.log['next'], s.sdlog['next']))
+
+    # unknown keyword
+    s = System()
+    s.send(frame("ZZZZ"))
+    s.settle(80)
+    total = (s.log['next'] + s.log['auto'] + s.log['bright_cycle']
+             + len(s.log['bright_set']) + len(s.log['mode_set'])
+             + len(s.log['marquee_set']) + len(s.log['img_set']))
+    res.add(total == 0, "unknown keyword ZZZZ -> nothing",
+            "total effects=%d" % total)
+
+    # over-long keyword-only frame "NEXTX" -> clen==5, rejected
+    s = System()
+    s.send(frame("NEXTX"))
+    s.settle(80)
+    res.add(s.log['next'] == 0, "NEXTX (clen==5) rejected by length guard",
+            "next=%d" % s.log['next'])
+
+    # half frame "MO" + terminator, then a valid NEXT: no false MODE, NEXT works
+    s = System()
+    s.send([ord('M'), ord('O')] + [0xFF, 0xFF, 0xFF])
+    s.settle(40)
+    false_mode = len(s.log['mode_set'])
+    s.send(frame("NEXT"))
+    s.settle(40)
+    res.add(false_mode == 0 and s.log['next'] == 1,
+            "partial 'MO'+FFF then valid NEXT",
+            "false mode_set=%d, later next=%d" % (false_mode, s.log['next']))
+
+    # full retreat: zero commands ever, outputs track sw, no spurious pulse
+    ok_track = True
+    detail = []
+    for v in range(8):
+        s = System(sw=(v | 0b1000))
+        s.settle(80)
+        if s.trans_mode() != ((~v) & 7):
+            ok_track = False
+        detail.append("%d->%d" % (v, s.trans_mode()))
+    s = System(sw=0xF)
+    s.settle(400)
+    spur = (s.log['next'] + s.log['auto'] + s.log['bright_cycle']
+            + s.sdlog['next'] + s.sdlog['auto'] + s.sdlog['img'])
+    res.add(ok_track, "retreat: trans_mode tracks ~sw with zero traffic",
+            " ".join(detail))
+    res.add(spur == 0 and s.st['brightness'] == 2,
+            "retreat: no spurious pulse, brightness stays at reset 2",
+            "spurious=%d brightness=%d" % (spur, s.st['brightness']))
+    if verbose:
+        print("      negative controls complete")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+    res = Result()
+    pass_a(res, args.verbose)
+    pass_b(res, args.verbose)
+    pass_c(res, args.verbose)
+    pass_d(res, args.verbose)
+    pass_e(res, args.verbose)
+    print("=" * 78)
+    total = len(res.rows)
+    print("%d/%d checks passed, %d failed" % (total - res.failed, total, res.failed))
+    print("=" * 78)
+    sys.exit(1 if res.failed else 0)
+
+
+if __name__ == "__main__":
+    main()
