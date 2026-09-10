@@ -5,7 +5,9 @@ module top(
     input                       key1,           // 手动下一张
     input                       key2,           // 自动播放 开/关
     input                       key3,           // 亮度档位循环
-    input       [3:0]           sw,             // 拨码开关：sw[2:0] (SW1-3) 选转场特效，sw[3] (SW4) 预留
+    input       [3:0]           sw,             // 拨码开关：sw[2:0] (SW1-3) 选转场特效，sw[3] (SW4) 屏蔽滚动字幕（ON=隐藏，与 SW1-3 极性相反）
+    input                       uart_rx,        // 串口屏 -> FPGA，F12，经板载 CH340/Type-C（PULLUP）
+    output                      uart_tx,        // FPGA -> 串口屏，D12；Stage 1 恒为空闲高
 
     output [5:0]                seg_sel,
     output [7:0]                seg_data,
@@ -55,7 +57,9 @@ wire [23:0] vout_data_base;
 wire [23:0] vout_data_bright;
 wire [23:0] vout_data_fade;
 wire [23:0] vout_data_audio;
+wire [23:0] vout_data_osd;
 wire [23:0] vout_data;
+wire        marquee_en;
 wire        display_valid;
 wire        auto_play_enabled;
 wire        key3_bright_press;
@@ -71,11 +75,14 @@ wire [1:0]  trans_top_idx;
 wire [2:0]  trans_effect;
 wire [1:0]  trans_img_idx;
 wire [3:0]  trans_fade_level;
-// DIP switches are active low (ON connects the pin to GND), so invert the
-// synchronized value to get an intuitive ON=1 mode. 3 bits: 000 auto-cycle,
-// 001..110 force one band effect, 111 force fade. sw[3] (SW4) stays reserved.
-// Assigned below, next to sw_v1's declaration: initializing it here made TD warn
-// HDL-5373 (used before declaration) and risked binding a 1-bit implicit net.
+// Transition mode select. The physical path inverts the active-low DIP switches
+// (ON connects the pin to GND) to an intuitive ON=1 mode: 000 auto-cycle,
+// 001..110 force one band effect, 111 force fade. The serial screen can override
+// it through a mux at the assignment below; with no screen command the override
+// is off and trans_mode is exactly ~sw_v1 as before. sw[3] (SW4) is the banner
+// mask, handled separately. Assigned below, next to sw_v1's declaration:
+// initializing it here made TD warn HDL-5373 (used before declaration) and risked
+// binding a 1-bit implicit net.
 wire [2:0]  trans_mode;
 
 wire [3:0]  state_code;
@@ -128,9 +135,66 @@ reg  [2:0]  brightness_level_v0;
 reg  [2:0]  brightness_level_v1;
 reg  [2:0]  sw_v0;
 reg  [2:0]  sw_v1;
+reg         sw4_v0;
+reg         sw4_v1;
 reg         vs_d;
 
-assign trans_mode = ~sw_v1;
+// ---- 串口屏控制：uart_screen_ctrl 的 clk 域命令效果 ----
+wire        cmd_next_pulse;
+wire        cmd_auto_pulse;
+wire        cmd_bright_cycle_pulse;
+wire [2:0]  cmd_bright_set;
+wire        cmd_bright_set_v;
+wire [2:0]  cmd_mode;
+wire        cmd_mode_set;
+wire        cmd_marquee;
+wire        cmd_marquee_set;
+wire [1:0]  cmd_img_sel;
+wire        cmd_img_sel_set;
+
+// mode/marquee 覆盖：clk 域锁存屏幕设定值，物理拨码一旦变动即清除覆盖
+// （last-writer-wins 兜底，两端互为退路）。ovr_en=0 时下面的 trans_mode /
+// marquee_en 退回已验证的物理项 ~sw_v1 / sw4_v1，逐位不变——没接屏幕时就是
+// 改前的行为。
+reg  [2:0]  mode_ovr_val;
+reg         mode_ovr_en;
+reg         marq_ovr_val;
+reg         marq_ovr_en;
+// 物理拨码同步到 clk 域并做变动检测（与 video_clk 域的 sw_v0/sw_v1、sw4_v0/sw4_v1
+// 是各自独立的同步器，互不影响）
+reg  [2:0]  sw_c0, sw_c1, sw_c2;
+reg         sw4_c0, sw4_c1, sw4_c2;
+// 覆盖状态再 2FF 同步进 video_clk，供 trans_mode / marquee_en 的 mux 使用
+reg  [2:0]  mode_ovr_val_v0, mode_ovr_val_v1;
+reg         mode_ovr_en_v0, mode_ovr_en_v1;
+reg         marq_ovr_val_v0, marq_ovr_val_v1;
+reg         marq_ovr_en_v0, marq_ovr_en_v1;
+
+// next/auto/img 命令脉冲 clk -> sd_card_clk 的 toggle-CDC：clk 域每来一条命令翻转
+// 一个 toggle，sd_card_clk 域 2FF 同步后用 s1^s2 还原成单周期脉冲。img 的 2-bit
+// 目标值用 data+toggle 同步（数据准静态、人类速率，toggle 边沿到达时 img_sel_s1
+// 已稳定 ≥2 拍）。
+reg         next_tgl, auto_tgl, img_tgl;
+reg  [1:0]  img_sel_lat;
+reg         next_tgl_s0, next_tgl_s1, next_tgl_s2;
+reg         auto_tgl_s0, auto_tgl_s1, auto_tgl_s2;
+reg         img_tgl_s0, img_tgl_s1, img_tgl_s2;
+reg  [1:0]  img_sel_s0, img_sel_s1;
+wire        cmd_next_pulse_sd    = next_tgl_s1 ^ next_tgl_s2;
+wire        cmd_auto_pulse_sd    = auto_tgl_s1 ^ auto_tgl_s2;
+wire        cmd_img_sel_pulse_sd = img_tgl_s1  ^ img_tgl_s2;
+
+// 转场模式：屏幕覆盖优先，否则退回已验证的物理项 ~sw_v1（一位未动）
+assign trans_mode = mode_ovr_en_v1 ? mode_ovr_val_v1 : ~sw_v1;
+
+// SW4 masks the scrolling slogan banner. Deliberately the inverse polarity of
+// SW1-3: those are mode selectors where ON=1 picks something, this one is a
+// kill switch, and the all-OFF power-up state must still show the banner so
+// the board demos out of the box. Pin is active-low with a PULLUP, so the raw
+// synced value is 1 when SW4 is OFF, hence no inversion here. The serial screen
+// can override the mask (marq_ovr_en_v1); otherwise the verified physical term
+// sw4_v1 wins, so with no screen command this is exactly the old behaviour.
+assign marquee_en = marq_ovr_en_v1 ? marq_ovr_val_v1 : sw4_v1;
 
 wire App_rd_en;
 wire [ADDR_BITS-1:0] App_rd_addr;
@@ -242,8 +306,95 @@ key_press_debounce #(
 always @(posedge clk or posedge rst_all) begin
     if (rst_all)
         brightness_level <= 3'd2;
-    else if (key3_bright_press)
+    else if (cmd_bright_set_v)                              // 屏幕 BRGT n：直接设档（优先）
+        brightness_level <= cmd_bright_set;
+    else if (key3_bright_press || cmd_bright_cycle_pulse)   // key3 或屏幕 BRUP：循环 +1
         brightness_level <= (brightness_level == 3'd4) ? 3'd0 : (brightness_level + 3'd1);
+end
+
+// 串口屏控制源：clk 域把 UART 字节翻译成命令效果。所有跨域注入都由下面的
+// toggle-CDC / 2FF 同步完成，本实例只在 clk 域产生效果，不含合并策略。
+uart_screen_ctrl #(
+    .CLK_FREQ_HZ (50_000_000),
+    .BAUD        (9600)
+) u_uart_screen_ctrl (
+    .clk                    (clk),
+    .rst                    (rst_all),
+    .uart_rx                (uart_rx),
+    .uart_tx                (uart_tx),
+    .cmd_next_pulse         (cmd_next_pulse),
+    .cmd_auto_pulse         (cmd_auto_pulse),
+    .cmd_bright_cycle_pulse (cmd_bright_cycle_pulse),
+    .cmd_bright_set         (cmd_bright_set),
+    .cmd_bright_set_v       (cmd_bright_set_v),
+    .cmd_mode               (cmd_mode),
+    .cmd_mode_set           (cmd_mode_set),
+    .cmd_marquee            (cmd_marquee),
+    .cmd_marquee_set        (cmd_marquee_set),
+    .cmd_img_sel            (cmd_img_sel),
+    .cmd_img_sel_set        (cmd_img_sel_set)
+);
+
+// mode/marquee 覆盖锁存 + 物理拨码变动检测（clk 域）。屏幕命令置 ovr_en 并锁值；
+// 任一物理拨码变动清 ovr_en，物理路径立即重新接管。复位值匹配 PULLUP 空闲态
+// （SW1-3 全 OFF = 111，SW4 OFF = 1），上电不会误判为"拨码变动"而清掉尚未置起的覆盖。
+always @(posedge clk or posedge rst_all) begin
+    if (rst_all) begin
+        sw_c0 <= 3'b111; sw_c1 <= 3'b111; sw_c2 <= 3'b111;
+        sw4_c0 <= 1'b1;  sw4_c1 <= 1'b1;  sw4_c2 <= 1'b1;
+        mode_ovr_val <= 3'd0; mode_ovr_en <= 1'b0;
+        marq_ovr_val <= 1'b1; marq_ovr_en <= 1'b0;
+    end else begin
+        sw_c0 <= sw[2:0]; sw_c1 <= sw_c0; sw_c2 <= sw_c1;
+        sw4_c0 <= sw[3];  sw4_c1 <= sw4_c0; sw4_c2 <= sw4_c1;
+
+        if (cmd_mode_set) begin
+            mode_ovr_val <= cmd_mode;
+            mode_ovr_en  <= 1'b1;
+        end else if (sw_c1 != sw_c2) begin
+            mode_ovr_en  <= 1'b0;
+        end
+
+        if (cmd_marquee_set) begin
+            marq_ovr_val <= cmd_marquee;
+            marq_ovr_en  <= 1'b1;
+        end else if (sw4_c1 != sw4_c2) begin
+            marq_ovr_en  <= 1'b0;
+        end
+    end
+end
+
+// 命令脉冲 -> toggle（clk 域）。img 的目标值先锁存再翻转 toggle，保证 data+toggle
+// 同步时数据先于 toggle 边沿稳定。
+always @(posedge clk or posedge rst_all) begin
+    if (rst_all) begin
+        next_tgl <= 1'b0; auto_tgl <= 1'b0; img_tgl <= 1'b0;
+        img_sel_lat <= 2'd0;
+    end else begin
+        if (cmd_next_pulse) next_tgl <= ~next_tgl;
+        if (cmd_auto_pulse) auto_tgl <= ~auto_tgl;
+        if (cmd_img_sel_set) begin
+            img_sel_lat <= cmd_img_sel;
+            img_tgl     <= ~img_tgl;
+        end
+    end
+end
+
+// sd_card_clk 域：2FF 同步 toggle，s1^s2 还原单周期脉冲；img 选图值同样 2FF 同步。
+// 复位后 toggle 与同步链都为 0，不会冒出虚假脉冲；这些脉冲与 sd_card_bmp 内部
+// 消抖出的 key_next_press / key_auto_press OR 合并，实体按键仍是兜底。
+always @(posedge sd_card_clk or posedge rst_all) begin
+    if (rst_all) begin
+        next_tgl_s0 <= 1'b0; next_tgl_s1 <= 1'b0; next_tgl_s2 <= 1'b0;
+        auto_tgl_s0 <= 1'b0; auto_tgl_s1 <= 1'b0; auto_tgl_s2 <= 1'b0;
+        img_tgl_s0  <= 1'b0; img_tgl_s1  <= 1'b0; img_tgl_s2  <= 1'b0;
+        img_sel_s0  <= 2'd0; img_sel_s1  <= 2'd0;
+    end else begin
+        next_tgl_s0 <= next_tgl; next_tgl_s1 <= next_tgl_s0; next_tgl_s2 <= next_tgl_s1;
+        auto_tgl_s0 <= auto_tgl; auto_tgl_s1 <= auto_tgl_s0; auto_tgl_s2 <= auto_tgl_s1;
+        img_tgl_s0  <= img_tgl;  img_tgl_s1  <= img_tgl_s0;  img_tgl_s2  <= img_tgl_s1;
+        img_sel_s0  <= img_sel_lat; img_sel_s1 <= img_sel_s0;
+    end
 end
 
 // 将 SD 控制域的慢速状态同步到 video_clk 域，供 OSD 和黑屏门控使用
@@ -261,6 +412,12 @@ always @(posedge video_clk or posedge rst_all) begin
         brightness_level_v1 <= 3'd2;
         sw_v0 <= 3'b111;                    // ~3'b111 = 3'b000 = auto-cycle out of reset
         sw_v1 <= 3'b111;
+        sw4_v0 <= 1'b1;                     // PULLUP: SW4 OFF = 1 = banner shown out of reset
+        sw4_v1 <= 1'b1;
+        mode_ovr_val_v0 <= 3'd0; mode_ovr_val_v1 <= 3'd0;
+        mode_ovr_en_v0  <= 1'b0; mode_ovr_en_v1  <= 1'b0;   // 覆盖默认关：trans_mode 退回 ~sw_v1
+        marq_ovr_val_v0 <= 1'b1; marq_ovr_val_v1 <= 1'b1;
+        marq_ovr_en_v0  <= 1'b0; marq_ovr_en_v1  <= 1'b0;   // 覆盖默认关：marquee_en 退回 sw4_v1
         vs_d <= 1'b0;
     end else begin
         disp_buf_idx_v0  <= disp_buf_idx;
@@ -273,8 +430,14 @@ always @(posedge video_clk or posedge rst_all) begin
         display_valid_v1 <= display_valid_v0;
         brightness_level_v0 <= brightness_level;
         brightness_level_v1 <= brightness_level_v0;
-        sw_v0 <= sw[2:0];                   // synchronize raw active-low pins SW1-3, sw[3] reserved
+        sw_v0 <= sw[2:0];                   // synchronize raw active-low pins SW1-3; sw[3] is synced separately below
         sw_v1 <= sw_v0;
+        sw4_v0 <= sw[3];                    // SW4 banner mask, own 2-FF chain, see marquee_en
+        sw4_v1 <= sw4_v0;
+        mode_ovr_val_v0 <= mode_ovr_val; mode_ovr_val_v1 <= mode_ovr_val_v0;  // clk -> video_clk 2FF
+        mode_ovr_en_v0  <= mode_ovr_en;  mode_ovr_en_v1  <= mode_ovr_en_v0;
+        marq_ovr_val_v0 <= marq_ovr_val; marq_ovr_val_v1 <= marq_ovr_val_v0;
+        marq_ovr_en_v0  <= marq_ovr_en;  marq_ovr_en_v1  <= marq_ovr_en_v0;
         vs_d <= vs;
     end
 end
@@ -290,6 +453,10 @@ sd_card_bmp #(
     .rst               (rst_all),
     .key_next          (key1),
     .key_auto          (key2),
+    .cmd_next_pulse    (cmd_next_pulse_sd),
+    .cmd_auto_pulse    (cmd_auto_pulse_sd),
+    .cmd_img_sel       (img_sel_s1),
+    .cmd_img_sel_pulse (cmd_img_sel_pulse_sd),
     .state_code        (state_code),
     .display_valid     (display_valid),
     .auto_play_enabled (auto_play_enabled),
@@ -465,7 +632,19 @@ osd_overlay #(
     .I_auto_play     (auto_play_v1),
     .I_brightness    (brightness_level_v1),
     .I_state_code    (state_code_v1),
-    .O_rgb           (vout_data)
+    .O_rgb           (vout_data_osd)
+);
+
+marquee_overlay #(
+    .H_ACTIVE (640),
+    .V_ACTIVE (480)
+) u_marquee_overlay (
+    .I_clk (video_clk),
+    .I_rst (rst_all),
+    .I_de  (de),
+    .I_rgb (vout_data_osd),
+    .I_en  (marquee_en),
+    .O_rgb (vout_data)
 );
 
 frame_read_write #(

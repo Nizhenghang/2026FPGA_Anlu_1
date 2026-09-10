@@ -2,7 +2,7 @@
 
 本项目面向 2026 安路赛道 FPGA 赛题一，在 HX4S20C 开发板上基于安路 EG4S20 FPGA 实现一个 HDMI 多媒体播放与展示系统。
 
-当前工程已完成 TF 卡 BMP 图片读取、**任意分辨率图片的片内最近邻缩放**、SDRAM 四缓冲帧存、HDMI 1.4b 音视频输出、**TF 卡 WAV 真实音乐流式播放（单曲循环）**、按键交互、亮度调节、OSD 状态叠加、**淡入淡出与一族横向带状转场（擦除 / 百叶窗 / 中心展开 / 随机条 / 梳状，可自动轮播）**、音频波形与频谱可视化，以及一整套无头构建脚本和周期精确验证模型。图片加载链路经过三层重试与看门狗加固，四张图片可在上电后一次性全部载入；图片载入完成后自动接管 SD 总线流式播放音乐，底部可视化随真实音乐跳动。
+当前工程已完成 TF 卡 BMP 图片读取、**任意分辨率图片的片内最近邻缩放**、SDRAM 四缓冲帧存、HDMI 1.4b 音视频输出、**TF 卡 WAV 真实音乐流式播放（单曲循环）**、按键交互、亮度调节、OSD 状态叠加、**画面正中的中文滚动字幕（竞赛十周年标语，`SW4` 可屏蔽）**、**淡入淡出与一族横向带状转场（擦除 / 百叶窗 / 中心展开 / 随机条 / 梳状，可自动轮播）**、音频波形与频谱可视化、**串口屏（淘晶驰 TJC/Nextion）经板载 Type-C UART 控制（替代全部按键与拨码，实体控制保留为兜底）**，以及一整套无头构建脚本和周期精确验证模型。图片加载链路经过三层重试与看门狗加固，四张图片可在上电后一次性全部载入；图片载入完成后自动接管 SD 总线流式播放音乐，底部可视化随真实音乐跳动。
 
 ## 硬件平台
 
@@ -110,12 +110,12 @@ FPGA 不在片内解码 MP3——与图片管线一致（图片离线转无压�
 - `PLL_HDMI_AUDIO` 仍保留（复位树依赖其 lock），但 12.288 MHz 音频主时钟与 `hdmi_audio_tone_i2s_64fs.v` / `I2S_receiver.v` 已不再例化，文件保留在仓库便于调试回挂。
 - 上电后自动触发 EDID 读取。
 
-### 6. 按键、拨码交互与 OSD
+### 6. 按键、拨码交互、OSD 与滚动字幕
 
 - `key1`：手动切换到下一张已载入的图片。
 - `key2`：开启 / 关闭自动轮播（间隔 1 秒，需已载入 2 张以上）。
 - `key3`：循环调节亮度档位 `B0` ~ `B4`，默认 `B2`。
-- 拨码开关 `sw[3:0]`（`SW1`~`SW4` = `C8`/`C7`/`C6`/`C5`，`PULLUP` 输入）：用 `SW1`/`SW2`/`SW3` 选择转场特效。拨码为低有效（ON 接地 = 0），RTL 同步后取反成 ON=1 的直观逻辑，即 `trans_mode = ~sw_v1[2:0]`；模式在每次转场**开始时**采样，拨动后从**下一张图**生效，不会打断进行中的转场。`SW4`（`sw[3]`）已约束但预留未用。全 OFF（上电默认）即 `000` 自动轮播，开箱就能依次演示整族特效。
+- 拨码开关 `sw[3:0]`（`SW1`~`SW4` = `C8`/`C7`/`C6`/`C5`，`PULLUP` 输入）：`SW1`/`SW2`/`SW3` 选择转场特效，`SW4` 屏蔽滚动字幕。拨码为低有效（ON 接地 = 0），RTL 同步后取反成 ON=1 的直观逻辑，即物理项 `~sw_v1[2:0]`；模式在每次转场**开始时**采样，拨动后从**下一张图**生效，不会打断进行中的转场。全 OFF（上电默认）即 `000` 自动轮播 + 字幕显示，开箱就能依次演示整族特效。**自第 7 节起，`trans_mode` / `marquee_en` 是「屏幕覆盖 mux」的物理兜底分支**——`trans_mode = mode_ovr_en_v1 ? mode_ovr_val_v1 : ~sw_v1`、`marquee_en = marq_ovr_en_v1 ? marq_ovr_val_v1 : sw4_v1`；屏幕发过 `MODE`/`MARQ` 命令时由覆盖值驱动、拨码一变动即夺回，从未发命令时 `ovr_en=0`，下表逐位不变。
 
   | SW3 | SW2 | SW1 | `trans_mode` | 转场特效 |
   |---|---|---|---|---|
@@ -128,6 +128,9 @@ FPGA 不在片内解码 MP3——与图片管线一致（图片离线转无压�
   | ON  | ON  | OFF | `110` | 梳状（奇偶组反向交错） |
   | ON  | ON  | ON  | `111` | 淡入淡出过黑 |
 
+- `SW4`（`sw[3]`）是**滚动字幕屏蔽开关**，极性与 `SW1`~`SW3` **刻意相反**：`OFF`（上电默认，`PULLUP` 读 1）= 字幕显示，`ON` = 字幕隐藏。反着来的理由是它是屏蔽键（类似静音）而不是模式选择位——这样「全 OFF 开箱即演示」不被破坏，评委面前不需要先记得拨一下；拨 `ON` 也是一条一行就能退回无字幕已验证画面的开关。RTL 上它走**独立**的 `sw4_v0`/`sw4_v1` 两级同步器，物理项 `sw_v0 <= sw[2:0]` 与 `~sw_v1` / `sw4_v1` 一位未动；第 7 节的屏幕覆盖只是叠加在它们之后的并联 mux，`ovr_en=0` 时转场特效与字幕路径与改前完全等价。
+- `marquee_overlay.v` 在画面正中（y 224..255，共 32 行）叠加一条横向滚动字幕，内容是「FPGA创新设计竞赛国赛十周年」。15 个 24x24 字模单元排在 32 px 节距上（左右各 4 px 字间距），文字总宽 480 px，行程 `TRAVEL = 640 + 480 = 1120` px：自右侧屏外进入、左侧屏外退出后从头循环；`SCROLL_FRAME_DIV = 2` 帧走 1 px，在实测 59.52 Hz 帧率下即 29.76 px/s、单圈 37.6 s，24 px 高的字读起来舒适。横带上下各 1 px 青色描边（`24'h60D8FF`，与 OSD 边框同色），带内把底图压暗 `>>2` 再写亮字（`24'hFFE878`），最亮与最暗背景下都读得清。
+- 字幕的全部逻辑都落在 `video_clk` 域，不碰 `sd_card_clk` / `ext_mem_clk` 那两条紧路径。两个刻意的设计选择：① 字模表是 360 项 `case` 的**纯组合 LUT 逻辑**而非同步 BRAM，后者会逼整个叠加层多打 1 像素流水；② 寻址不用除法器——`u = x_pos + marq_pos - 640` 在 11 bit 线上借位回绕，一条 `u < 480` 无符号比较就同时覆盖「尚未进场」与「已完全离场」两端，`cell_idx = u[9:5]`、`col = u[4:0]` 直接是 32 px 节距的商与余数。中文字模由 `tools/gen_marquee_font.py`（PIL + 黑体 @26 px，墨迹 bbox 22x22 原生渲染、不经缩放重采样）生成 `marquee_font.vh`，经 `` `include `` 进入模块体，**不注册进 `.al`**（裸 `function` 无法独立编译，注册会直接语法报错）。
 - `osd_overlay.v` 在画面左上角叠加展示型面板：`ANLOGIC MEDIA 26` 标题、`IMG:n` 图片编号、自动 / 手动模式、亮度进度条、SD 状态码和 HDMI AUDIO 标识，并带边框、顶栏和闪烁运行点。内置 8x8 点阵字模，不占用外部 ROM。
 - 数码管 6 位全部启用，从左到右依次是：**已载入图片张数** `img_loaded_count`、**加载失败原因** `fail`、**扫描找到的 BMP 张数** `img_found_count`、**下一个加载序号** `next_load_idx`、**音频链路位 `chain`**、**SD 状态码**（最右一位就是原先单独显示状态码的那一位）。
 
@@ -142,15 +145,93 @@ FPGA 不在片内解码 MP3——与图片管线一致（图片离线转无压�
   | `E` | 流读器正常写 FIFO | 断点在下游：`audio_pcm_player` / ACR / 发射核 |
 
   张数不足 4 时用第 2~4 位分流：`found < 4` → 扫描漏了目录项（查 LFN / 属性 / 簇号判定）；`found == 4` 且 `next == 4` → 第四张加载尝试 4 次后被放弃，`fail` 的 bit3 = 1 秒无进度看门狗、bit2 = 头扇区被 `header_match_r` 拒绝、bit1:0 是读到的重试计数；`next < 4` 且 `fail == 0` → 加载根本没被再次武装，查武装条件。
-- OSD 叠加位于视频转 AXI-Stream 之前，不影响 TF 卡读取、帧缓存和发射核结构。
+- OSD 与滚动字幕两个叠加层都位于视频转 AXI-Stream 之前，不影响 TF 卡读取、帧缓存和发射核结构。
 
-### 7. 亮度、音频可视化与视频链路顺序
+### 7. 串口屏控制（淘晶驰 TJC/Nextion，替代按键与拨码，保留兜底）
+
+板载 Type-C 串口屏经 UART 成为主控制面，替代 `key1`/`key2`/`key3` 与 `SW1`~`SW4` 的全部功能，并扩展出直接选图 / 直接设亮度 / 直接选特效。**实体按键与拨码完整保留为兜底**：屏幕没接、没上电或故障时，板上交互与改动前逐位一致。合并策略是 last-writer-wins，两端互为退路。
+
+RTL 全部在 `uart_screen_ctrl.v`（clk 域，UART RX + TJC 命令解析）与 `top_tf_hdmi_audio.v`（跨时钟域注入 + 与物理控制合并）里；`sd_card_bmp.v` 仍是单时钟模块，命令脉冲在 top 里 CDC 之后才接进去。
+
+#### 接线
+
+- **首选：板载 Type-C / CH340**。`uart_rx = F12`（FPGA 输入，`PULLUP`）、`uart_tx = D12`（FPGA 输出），LVCMOS33，经板载 CH340 USB-UART 接到 Type-C 口，用一根 C-to-C 线连屏幕与板子。
+  - **电气前提**：板子这端 CH340 是 USB **从设备**，要通信，串口屏那端必须是 USB **Host** 才能枚举它。多数淘晶驰屏的 Type-C 是给 PC 编程用的从口——若上板发现 C-to-C 直连枚举不通，走下面的退路。
+- **退路：2×40 GPIO 排针 TTL 飞线**。把屏幕的 TTL 串口线（TX/RX/GND）直接接到排针上两个空闲 IO，绕开 CH340，**必须共地**。此路 **RTL 完全不变**，只改 `pin.adc` 里 `uart_rx`/`uart_tx` 两行的 `LOCATION`（一行切换）。
+
+#### 协议
+
+- **波特率 9600**（= 淘晶驰出厂默认，开箱即通、无需改屏幕工程），8N1，LSB first。FPGA 侧 `BAUD` 是参数；如需提速，改 FPGA 参数 + 改屏幕工程波特率两端对齐即可（50 MHz / 9600 = 5208，误差 0.006%，远小于 UART 容限）。
+- **帧格式**：4 字符关键字 +（可选）`空格 + 1 位数字参数`，以淘晶驰惯例的**连续 3 个 `0xFF`** 结尾。负载字节永远是 ASCII（不会是 `0xFF`），所以 `0xFF` 唯一地表示终止符；FPGA 收到第 3 个 `0xFF` 即解析缓冲区。
+
+| 命令 | 参数 | 作用 | 等价实体控制 |
+|---|---|---|---|
+| `NEXT` | 无 | 下一张已载入图片 | `key1` |
+| `AUTO` | 无 | 开 / 关自动轮播 | `key2` |
+| `BRUP` | 无 | 亮度循环 +1（到顶回 0） | `key3` |
+| `BRGT` | n = 0..4 | 直接设亮度档 | 增强 |
+| `MODE` | n = 0..7 | 直接设转场模式（0 自动轮播 / 1-6 带状特效 / 7 淡入淡出） | `SW1`~`SW3`，增强为直接选 |
+| `MARQ` | n = 0..1 | 字幕 1 = 显示 / 0 = 隐藏 | `SW4` |
+| `IMGX` | n = 1..4 | 直接选第 n 张（仅在已载入范围内生效） | 增强 |
+
+参数越界（如 `MODE 8`、`BRGT 5`、`IMGX 0`）或多位参数（如 `MODE 33`）会被长度 / 数字范围守卫静默丢弃，不会误触发。
+
+#### 屏幕端按钮事件代码（淘晶驰 USART HMI）
+
+每个按钮在 **Touch Release Event** 里写两行——`print` 发 ASCII 命令，`printh ff ff ff` 发终止符（下表 `⏎` 表示两行分开写）：
+
+| 按钮 | 事件代码 |
+|---|---|
+| 下一张 | `print "NEXT"` ⏎ `printh ff ff ff` |
+| 自动轮播 | `print "AUTO"` ⏎ `printh ff ff ff` |
+| 亮度 +1 | `print "BRUP"` ⏎ `printh ff ff ff` |
+| 亮度档 n（0..4，各一个按钮） | `print "BRGT 3"` ⏎ `printh ff ff ff` |
+| 转场模式 n（0..7，各一个按钮） | `print "MODE 3"` ⏎ `printh ff ff ff` |
+| 字幕显示 / 隐藏 | `print "MARQ 1"` / `print "MARQ 0"` ⏎ `printh ff ff ff` |
+| 直接选图 n（1..4，各一个按钮） | `print "IMGX 2"` ⏎ `printh ff ff ff` |
+
+屏幕工程波特率保持 9600 与 FPGA 对齐。
+
+#### 兜底语义（last-writer-wins，两端互为退路）
+
+- **脉冲类**（`NEXT` / `AUTO` / `BRUP`）：实体按键与屏幕命令 **OR 合并**，任一都能触发。亮度直接设值 `BRGT` 覆盖当前档，实体 `key3` 仍可继续循环。
+- **电平类**（`MODE` / `MARQ`）：屏幕命令置覆盖使能 `ovr_en` 并锁存值；**实体拨码一旦变动**（clk 域同步后检测到 `sw` 电平变化）就清 `ovr_en`，物理路径立即重新接管。于是「动一下拨码 = 夺回控制权，发一条屏幕命令 = 屏幕夺回」，谁都不会被永久锁死。
+
+#### 跨时钟域与覆盖 mux（核心正确性点）
+
+- **亮度**：UART 与 `key3` / `brightness_level` 同在 clk 域，直接合并，无 CDC。
+- **`NEXT` / `AUTO` / `IMGX`（→ sd_card_clk 域）**：命令脉冲用 **toggle-CDC** 过域——clk 域每来一条命令翻转一个 reg，sd_card_clk 域 2FF 同步 + `s1^s2` 边沿检测还原成单周期脉冲，再 OR 进 `sd_card_bmp` 现有的 key 条件。`IMGX` 的 2-bit 目标值用 **data + toggle** 同步（数据准静态、人类速率，toggle 边沿到达时数据已稳定 ≥2 拍）。所有 CDC 都在 top 里做，`sd_card_bmp` 保持单时钟。
+- **`MODE` / `MARQ`（→ video_clk 域）**：保留已验证的物理路径**一位不动**——`sw_v0 <= sw[2:0]`、`trans_mode` 的物理项 `~sw_v1`、`sw4_v0 <= sw[3]`、`marquee` 的物理项 `sw4_v1` 全部原样。屏幕覆盖作为**并联 mux 叠加在其后**：clk 域维护 `mode_ovr_en/val`、`marq_ovr_en/val`，2FF 同步进 video_clk，
+
+  ```verilog
+  assign trans_mode = mode_ovr_en_v1 ? mode_ovr_val_v1 : ~sw_v1;
+  assign marquee_en = marq_ovr_en_v1 ? marq_ovr_val_v1 : sw4_v1;
+  ```
+
+  **退路天然成立**：屏幕从未发命令时 `ovr_en = 0`，`trans_mode` / `marquee_en` 与改前逐位相同。
+
+#### 退路开关与验证
+
+- **一行退路**：不接屏幕 → 所有 `ovr_en = 0`、无命令脉冲注入，板上行为与改动前完全一致，无需改代码。
+- **接线退路**：Type-C 枚举不通 → 改 `pin.adc` 两行 `LOCATION` 到 GPIO 排针 TTL 飞线，RTL 不动。
+- **离线验证**：`tools/sim_uart_ctrl.py` 是这条链路的周期精确模型（三时钟域按真实相位偏移跑在同一时间轴上）。Pass A 真实分频 5208 逐字节解码，B 七条命令效果 + 越界守卫，C toggle-CDC 每条命令恰好一个 sd 脉冲且 `IMGX` 值正确，D 覆盖 mux + 拨码夺回 + 亮度合并，E 负对照（只给 2 个 `0xFF`、未知关键字、`NEXTX` 超长、半帧后接有效帧、**完全不发命令时输出与基线逐位一致**）。全部 34 项通过。
+
+#### 竞赛规则说明
+
+串口屏自带 MCU，但它是**人类输入外设**（等同遥控器 / 键盘）：只发命令，不参与任何媒体算法、控制逻辑或数据预处理。显示 / 转场 / 缩放 / 音频仍 100% 在 FPGA 内自主实现，符合赛题「算法、控制逻辑和数据处理流程均在 FPGA 内自主实现，未引入额外处理器参与控制或算法预处理」的要求。
+
+#### 尚未做（Stage 2）
+
+`uart_tx` 目前恒为空闲高（Stage 1 只做 RX 控制）。状态回传（把 `IMG:n` / 亮度 / 自动开关 / 模式实时发回屏幕文本控件）留到 Stage 1 上板验证通过后再接，用 `ENABLE_READBACK` 参数一键开关，关掉即退回 Stage 1 行为。
+
+### 8. 亮度、音频可视化与视频链路顺序
 
 - `video_brightness.v` 对 RGB 三通道做饱和加减，移位加法实现，不引入乘法器。
 - `audio_visualizer.v` 采样 HDMI 音频链路的左右声道 PCM，在画面底部绘制滚动波形、网格背景、频谱柱、峰值线和高能量闪烁点；按符号翻转间隔估算音阶频率区间。
-- 视频链路顺序：帧缓存读出 → 转场 → 亮度 → 音频可视化 → OSD → RGB 转 AXI-Stream → HDMI 发射核。因此图片渐入时 OSD 状态始终清晰可读。
+- 视频链路顺序：帧缓存读出 → 转场 → 亮度 → 音频可视化 → OSD → **滚动字幕** → RGB 转 AXI-Stream → HDMI 发射核。因此图片渐入时 OSD 状态与字幕始终清晰可读；字幕排在最末端，压暗的是它下面的成品画面。
+- 三个叠加区在垂直方向互不重叠：OSD 面板 y ≤ 117、字幕横带 y 224..255（画面正中）、音频可视化 y ≥ 352。`tools/sim_marquee.py` 的 Pass C 对这条不重叠性和横带的 1+3+24+3+1 行构成都有断言。
 
-### 8. 加载链路鲁棒性
+### 9. 加载链路鲁棒性
 
 三层独立的重试与看门狗，覆盖从单个扇区到整张图的不同粒度：
 
@@ -207,21 +288,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/td_build.ps1 -Stage al
 
 ### 时序与资源（最近一次构建实测）
 
-Slow / Fast 两个 corner 全部收敛，Setup / Hold 违例端点均为 0，全局 Setup WNS +0.223 ns、Hold WNS +0.004 ns。
+Slow / Fast 两个 corner 全部收敛，Setup / Hold 违例端点均为 0，全局 Setup WNS +0.569 ns、Hold WNS +0.011 ns（串口屏 Stage 1 合入后的最近一次无头构建）。
 
-| 时钟 | 约束 | 实测 fmax（域内） | 域内 SWNS |
+| 时钟 | 约束 | 实测 fmax（域内） | SWNS（含跨域） |
 |---|---|---|---|
-| `sd_card_clk` | 100 MHz | 102.281 MHz | +0.223 ns |
-| `ext_mem_clk` | 125 MHz | 149.410 MHz | +1.307 ns |
-| `video_clk` | 25 MHz | 37.165 MHz | +13.093 ns |
-| `clk` | 50 MHz | 191.241 MHz | +14.771 ns |
-| `hdmi_5x_clk` | 125 MHz | 283.688 MHz | +4.475 ns |
+| `sd_card_clk` | 100 MHz | 106.033 MHz | +0.569 ns |
+| `ext_mem_clk` | 125 MHz | 157.134 MHz | +0.714 ns |
+| `video_clk` | 25 MHz | 35.312 MHz | +11.681 ns |
+| `clk` | 50 MHz | 72.558 MHz | +3.109 ns |
+| `hdmi_5x_clk` | 125 MHz | 308.642 MHz | +4.760 ns |
 
-跨域路径同样收敛：`sd_card_clk → ext_mem_clk` +0.714 ns、`sd_card_clk → clk` +4.215 ns。资源占用 6108 slices（62.33%）、36 个 RAM、2 个 DSP。
+各时钟 SWNS 已同时统计 intra- 与 inter-clock 路径（见 `final_timing.rpt` 注），全部为正、违例端点 0。资源占用：布局布线后 6436 slices（65.67%）、36 RAM、2 DSP；综合阶段 7185 LUT、6778 寄存器。串口屏 UART RX + 命令解析 + 三域 CDC 较上一版增加约 96 slices（6340 → 6436），**RAM / DSP 不变**——解析器是纯组合 LUT 逻辑，没有推断出 BRAM，与字幕字模表同理。
 
-余量最紧的是 `sd_card_clk` 域内路径（+0.223 ns，fmax 102.281 MHz vs 100 MHz 约束，约 2.3%）：音频流式读取（`sd_audio_stream`）与图片级重试逻辑都在这个域，**横向带状转场引擎完全不碰它**。上一版这里是 +0.499 ns，本次收窄属于布局布线在不同构建间的正常抖动，不是回归。
+滚动字幕给 `video_clk` 域加了约 600 个 LUT，**BRAM 保持 36 不变**——字模表是纯组合 LUT 逻辑，没有被推断成 RAM；该域对 25 MHz 约束仍有 +11.681 ns 余量（fmax 35.312 MHz）。
 
-带状转场引擎落在 `ext_mem_clk`（SDRAM 读）域，是这次唯一为时序改过结构的地方。首版把 `select_top` 的组合深度暴露在 `g → next_sel_r` 路径上：前导 `g+1` 增量器叠加 split 分支 `|gi-half|` 的串行绝对值链（减法器 → 选择器 → 比较器）凑成 9 级逻辑，1 个违例端点、SWNS −0.184 ns。两处**等价**改写把这条路径拆短：① 把 `g+1` 寄存成 `g_plus1`，`next_sel_comb` 读触发器而非加法器（滞后 1 拍无影响，`next_sel_r` 只在约 1280 拍后的组边界被消费）；② 把 split 的 `|gi-half| < K` 改写成两个**并行**比较 `(gi > half-K) && (gi < half+K)`，界由 `prog` 推出，`gi` 不再串过减法器。修复后 `ext_mem_clk` 域内 SWNS 从 −0.184 ns 回到 +1.307 ns，违例端点归零。改动的正确性在 `tools/sim_transition.py` 的 Pass G 里各有断言兜底：G0 穷举证明 split 两式恒等，G2 在带 `g_plus1` 滞后的 FSM 下逐字校验六种特效的缓冲归属与组边界重定向不变。**后续若再改 `select_top`，不要把 `gi` 重新接回减法器/绝对值串行链，否则这条 8 ns 路径会再次违例。**
+历次构建间 `clk` / `ext_mem_clk` 等域的小幅漂移（如 `clk` 域 fmax 77.328 → 72.558 MHz、`ext_mem_clk` +0.872 → +0.714 ns）都落在字幕与串口屏不碰的路径上，是布局布线在不同构建间的抖动而非回归，各域违例端点始终为 0、余量为正。`clk` 域最紧路径仍是 `seg_scan` 位选多路选择器到 `seg_data` 输出寄存器（4 级逻辑、以线延迟为主）；串口屏命令解析是慢速组合匹配，没有成为该域新瓶颈（仍有 +3.109 ns 余量）。
+
+余量最紧的是 `sd_card_clk`（+0.569 ns，fmax 106.033 MHz vs 100 MHz 约束，约 6.0%）：音频流式读取（`sd_audio_stream`）与图片级重试逻辑都在这个域，**横向带状转场引擎与滚动字幕都完全不碰它**。串口屏在该域只新增一条 CDC 同步链、key 条件的一个 OR 输入和受 `img_loaded_count` 门控的 `img_idx` 载入，构建后违例端点仍为 0、余量仍为正，与计划预期一致。
+
+带状转场引擎落在 `ext_mem_clk`（SDRAM 读）域，是带状转场那次唯一为时序改过结构的地方。首版把 `select_top` 的组合深度暴露在 `g → next_sel_r` 路径上：前导 `g+1` 增量器叠加 split 分支 `|gi-half|` 的串行绝对值链（减法器 → 选择器 → 比较器）凑成 9 级逻辑，1 个违例端点、SWNS −0.184 ns。两处**等价**改写把这条路径拆短：① 把 `g+1` 寄存成 `g_plus1`，`next_sel_comb` 读触发器而非加法器（滞后 1 拍无影响，`next_sel_r` 只在约 1280 拍后的组边界被消费）；② 把 split 的 `|gi-half| < K` 改写成两个**并行**比较 `(gi > half-K) && (gi < half+K)`，界由 `prog` 推出，`gi` 不再串过减法器。修复后 `ext_mem_clk` 域 SWNS 回到正余量（当时 +1.307 ns，本次构建 +0.714 ns），违例端点归零。改动的正确性在 `tools/sim_transition.py` 的 Pass G 里各有断言兜底：G0 穷举证明 split 两式恒等，G2 在带 `g_plus1` 滞后的 FSM 下逐字校验六种特效的缓冲归属与组边界重定向不变。**后续若再改 `select_top`，不要把 `gi` 重新接回减法器/绝对值串行链，否则这条 8 ns 路径会再次违例。**
 
 `timing.sdc` 中对 SDRAM 硬核 DQ 边界写了 `set_max_delay -datapath_only` 例外：这些路径全在加密 IP 内部、fabric 与 PHY 之间没有用户逻辑，安路也未随该 IP 附带 `.tcl` 约束，不做例外时它们贡献总 TNS 的 87% 伪违例。
 
@@ -235,6 +320,10 @@ Slow / Fast 两个 corner 全部收敛，Setup / Hold 违例端点均为 0，全
 | `sim_scaler_nn.py` | 缩放器时序与弹性缓冲峰值占用 |
 | `sim_dir_scan.py` | 按字节重放根目录扫描，直读 TF 卡，证明扫描器确实记录到全部 BMP |
 | `sim_sd_retry.py` / `sim_transition.py` | 扇区级重试、转场状态机与带状特效引擎（含 3 位 `I_mode` 模式选择、`select_top` 逐组缓冲归属、组边界重定向、Pass G 六特效扫描几何与 ASCII 条带，以及模式交换 / 去掉饱和兜底两个负对照） |
+| `sim_uart_ctrl.py` | 串口屏控制链路（第 7 节）的三时钟域周期精确模型，clk/sd_card_clk/video_clk 按真实相位偏移跑在同一时间轴上。Pass A 真实分频 5208 逐字节解码、B 七条命令效果 + 越界守卫、C toggle-CDC 每条命令恰好一个 sd 脉冲且 `IMGX` 值正确、D 覆盖 mux + 拨码夺回 + 亮度合并、E 五个负对照（含「零命令时输出与基线逐位一致」的退路证明），共 34 项 |
+| `gen_marquee_font.py` | PIL 渲染标语中文字模 → `marquee_font.vh` 与预览图。自带墨迹自检（非空、不越 24x24、居中、`赛` 两处逐位一致、无字符冲突）与负对照（故意偏移 1 px 居中、故意留空一个字模、`PITCH=30` 都必须被抓到） |
+| `sim_marquee.py` | 字幕周期精确模型。Pass A 逐周期镜像 raster tracker 两条分支、B 穷举 640x1120 = 716800 组证明借位回绕寻址恒等于无界判据且 `cell_idx`/`col` 就是节距的商与余数、C 横带几何与邻区不重叠、D 整帧渲染逐像素对比生成器的黄金模型并校验滚动节奏与 SW4 屏蔽、E 五个负对照 |
+| `check_marquee_transcription.py` | RTL ↔ 生成器 ↔ top ↔ `.al` 一致性：`.vh` 与重新渲染逐字节相同，每个 localparam / 位切片 / 寄存器位宽 / 色值都由生成器常量**重算**而非二次手写，链路接线与 SW4 极性，`.al` 注册与 `` `include `` 位置；外加一条 Verilog-2001 保留字静态检查——`wire [4:0] cell;` 曾让整轮综合直接 HDL-8007 语法失败，而当时 95 项行为检查与 72 项一致性检查全绿。九个内存内变异必须全部被前面某项抓到 |
 | `cmp_bit.py` | 比较两个比特流的配置体。ASCII 头带分钟级 `# Date:`，所以未改动设计的重编也不是逐字节相同，整文件哈希比较必然误报 |
 | `td_build.ps1` / `td_flow_exit.tcl` | 无头构建 |
 | `gen_test_bmp.py` / `check_sd_card.py` / `probe_retry_trace.py` / `render_defect_preview.py` | 测试图生成与卡上诊断 |
@@ -258,7 +347,8 @@ Slow / Fast 两个 corner 全部收敛，Setup / Hold 违例端点均为 0，全
 3. 插入 TF 卡，HDMI 线接到开发板 HDMI_B。
 4. 用 Anlogic TD 打开 `src/td_project/HDMI1.4b_Transmitter_v1.0.al`，综合、布局布线并下载；仓库里 `best_result/` 的比特流是最近一次 GUI 构建的产物，未改 RTL 时可以直接烧。若用无头脚本重新构建过，按「构建与烧录」一节的路径规则选择比特流。
 5. 首图加载完成后显示器应出现图片，数码管状态码停止变化；约 7 秒后四张图全部载入。
-6. `key1` 手动切换，`key2` 开关自动轮播，`key3` 调节亮度。默认（`SW1`/`SW2`/`SW3` 都 OFF）切换时应依次轮播淡入淡出、擦除↓、擦除↑、百叶窗、中心展开、随机条、梳状；按第 6 节的表拨对应拨码可固定为某一种特效（下一张图生效）。
+6. `key1` 手动切换，`key2` 开关自动轮播，`key3` 调节亮度。默认（`SW1`/`SW2`/`SW3` 都 OFF）切换时应依次轮播淡入淡出、擦除↓、擦除↑、百叶窗、中心展开、随机条、梳状；按第 6 节的表拨对应拨码可固定为某一种特效（下一张图生效）。画面正中（`SW4` 保持 OFF）应有一条自右向左滚动的十周年标语字幕，约 37.6 s 一圈。
+7. 字幕的四项上板验收：① 横带在画面正中、文字水平滚动且不撕裂；② 左上 OSD 面板与底部频谱完全没被影响；③ `SW4` 拨 ON 字幕立即消失、拨回 OFF 立即恢复；④ `SW1`~`SW3` 的转场特效行为与改前逐项一致——这是独立的 `sw4_v0`/`sw4_v1` 同步器没有污染 `trans_mode` 的真机证据。
 
 ## 后续实现方向
 
@@ -275,8 +365,8 @@ Slow / Fast 两个 corner 全部收敛，Setup / Hold 违例端点均为 0，全
 
 ### 3. 图层叠加与字幕增强
 
-- 在现有 OSD 基础上扩展更丰富的文字层：时间戳、作品标语、参数提示。
-- 支持更大地字号、简单图标或中文点阵字库。
+- ~~作品标语~~、~~中文点阵字库~~ 已随 `marquee_overlay.v` 落地：24x24 黑体点阵、15 个字模、半透明横带跑马灯。**尚未做**：时间戳、参数提示、简单图标。
+- 换标语要改两处并保持一致：`gen_marquee_font.py` 的 `SLOGAN`，和 `marquee_overlay.v` 里硬写的 `localparam N_CELLS`（`TEXT_W` / `TRAVEL` 由它推出，会自动跟着走）。两边不一致时 `check_marquee_transcription.py` 直接报错。超过 16 个字模还要放宽 `marquee_glyph` 的 `cell_idx[3:0]` 实参位宽，同一条检查也会拦住。更多字号或图标可复用同一条 PIL → `.vh` → `` `include `` 管线。
 
 ### 4. 实时参数调节
 
@@ -295,8 +385,9 @@ Slow / Fast 两个 corner 全部收敛，Setup / Hold 违例端点均为 0，全
 
 ## 当前核心模块参考
 
-- `top_tf_hdmi_audio.v`：系统顶层，连接 TF 卡读取、SDRAM、视频时序、HDMI 发射和音频链路。
-- `SD/sd_card_bmp.v`：BMP 扫描调度、图片加载与重试、切换控制。
+- `top_tf_hdmi_audio.v`：系统顶层，连接 TF 卡读取、SDRAM、视频时序、HDMI 发射和音频链路；并承接串口屏命令的跨时钟域注入与「实体按键 / 拨码 ↔ 屏幕覆盖」的 last-writer-wins 合并。
+- `uart_screen_ctrl.v`：clk 域串口屏桥（第 7 节）。UART 8N1 RX（2FF 同步 + 中点采样）+ 淘晶驰 TJC 命令解析（4 字符关键字 + 可选 ` 数字`，连续 3 个 `0xFF` 结尾），产出 `NEXT`/`AUTO`/`BRUP` 单周期脉冲与 `BRGT`/`MODE`/`MARQ`/`IMGX` 的「值 + set 选通」。不含合并策略；Stage 1 `uart_tx` 恒为空闲高。
+- `SD/sd_card_bmp.v`：BMP 扫描调度、图片加载与重试、切换控制。仍是单时钟（sd_card_clk）模块；屏幕命令脉冲在 top 里 CDC 之后经 `cmd_next_pulse`/`cmd_auto_pulse` OR 进现有 key 条件，`cmd_img_sel`(+`_pulse`) 受 `img_loaded_count` 门控直接选图。
 - `SD/bmp_read.v`：FAT32 解析、根目录扫描、BMP 头校验与像素流输出。
 - `SD/scaler_nn.v`：最近邻缩放，把任意受支持分辨率映射到 640 x 480 画布并居中、填黑边；横纵两轴各自独立取 `min(源 × 4, 640/480)`，**非严格等比**——4:3 源或两轴都未达 4 倍上限的小图不变形，其余宽高比会被拉伸/压扁。
 - `SD/sd_card_sec_read_write.v`：扇区级 SPI 读，含起始令牌重试。
@@ -307,6 +398,7 @@ Slow / Fast 两个 corner 全部收敛，Setup / Hold 违例端点均为 0，全
 - `video_fade.v`：按转场给出的电平做比例缩放。
 - `audio_visualizer.v`：底部波形、频谱柱和峰值显示叠加。
 - `osd_overlay.v`：展示型状态面板叠加，内置 8x8 字模。
+- `marquee_overlay.v`：画面正中滚动字幕叠加，内置 24x24 中文点阵字模——`marquee_font.vh` 由 `tools/gen_marquee_font.py` 生成，经 `` `include `` 引入模块体，**不入 `.al`**。`I_en` 由 `SW4` 驱动，OFF = 显示。
 - `video_rgb_to_axis_640x480.v`：RGB/DE 转 AXI-Stream。
 - `SD/sd_audio_stream.v`：sd_card_clk 域音乐流读器，扫描定位 `MUSIC.WAV` 后跳头、组帧 {R,L}、背压、放完回卷循环，写异步 FIFO。
 - `audio_pcm_player.v`：video_clk 域 48 kHz 节拍器，小数分频取 FIFO 前瞻数据、16→24-bit 左对齐输出，欠载时持续打 valid 填 0。
@@ -315,4 +407,4 @@ Slow / Fast 两个 corner 全部收敛，Setup / Hold 违例端点均为 0，全
 
 ## 备注
 
-本项目遵循赛题要求：算法、控制逻辑和数据处理流程均在 FPGA 内自主实现，未引入额外处理器参与控制或算法预处理。`doc/convert` 与 `tools/` 下的 Python 脚本只用于离线制作测试素材、驱动构建和验证逻辑，不参与板上的实时数据通路。
+本项目遵循赛题要求：算法、控制逻辑和数据处理流程均在 FPGA 内自主实现，未引入额外处理器参与控制或算法预处理。`doc/convert` 与 `tools/` 下的 Python 脚本只用于离线制作测试素材、驱动构建和验证逻辑，不参与板上的实时数据通路。第 7 节的串口屏自带 MCU，但它是**人类输入外设**（等同遥控器 / 键盘）：只经 UART 发命令，不参与任何媒体算法、控制逻辑或数据预处理，显示 / 转场 / 缩放 / 音频仍 100% 在 FPGA 内自主实现。

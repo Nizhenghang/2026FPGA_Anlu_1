@@ -18,6 +18,14 @@ module sd_card_bmp #(
     input                       rst,
     input                       key_next,
     input                       key_auto,
+    // Serial-screen commands, already crossed into this sd_card_clk domain by
+    // the top level (toggle-CDC for the pulses, data+toggle for cmd_img_sel), so
+    // this module stays single-clock. The two pulses OR into the debounced key
+    // conditions below; cmd_img_sel directly selects an already-loaded picture.
+    input                       cmd_next_pulse,
+    input                       cmd_auto_pulse,
+    input       [1:0]           cmd_img_sel,
+    input                       cmd_img_sel_pulse,
     output [3:0]                state_code,
     output reg                  display_valid,
     output                      auto_play_enabled,
@@ -435,7 +443,7 @@ always @(posedge clk or posedge rst) begin
                 scan_raw_only         <= 1'b0;
                 raw_fallback_started  <= 1'b0;
             end else begin
-                if (key_auto_press && first_image_committed && (img_found_count > 3'd1)) begin
+                if ((key_auto_press || cmd_auto_pulse) && first_image_committed && (img_found_count > 3'd1)) begin
                     auto_play_en <= ~auto_play_en;
                     auto_cnt     <= 32'd0;
                 end
@@ -452,9 +460,16 @@ always @(posedge clk or posedge rst) begin
                     auto_cnt <= 32'd0;
                 end
 
-                if (key_next_press && first_image_committed && (img_loaded_count > 3'd1)) begin
+                if ((key_next_press || cmd_next_pulse) && first_image_committed && (img_loaded_count > 3'd1)) begin
                     img_idx      <= next_from_loaded;
                     disp_buf_idx <= next_from_loaded;
+                    auto_cnt     <= 32'd0;
+                end
+
+                if (cmd_img_sel_pulse && first_image_committed &&
+                    ({1'b0, cmd_img_sel} < img_loaded_count)) begin
+                    img_idx      <= cmd_img_sel;
+                    disp_buf_idx <= cmd_img_sel;
                     auto_cnt     <= 32'd0;
                 end
 
