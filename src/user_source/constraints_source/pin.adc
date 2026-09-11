@@ -46,11 +46,22 @@ set_pin_assignment	{ seg_sel[2] }	{ LOCATION = C13; IOSTANDARD = LVCMOS33; DRIVE
 set_pin_assignment	{ seg_sel[3] }	{ LOCATION = F10; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
 set_pin_assignment	{ seg_sel[4] }	{ LOCATION = E11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
 set_pin_assignment	{ seg_sel[5] }	{ LOCATION = D11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
-# 串口屏控制（淘晶驰 TJC/Nextion），经板载 CH340 / Type-C：F12=uart_rx(入), D12=uart_tx(出)
-# 退路：若 Type-C 两端都是 USB 从设备无法枚举，把下面两行的 LOCATION 改到 2x40 GPIO 排针上
-# 两个空闲 IO，用屏幕 TTL 串口线(TX/RX/GND)飞线直连，RTL 不变。
-set_pin_assignment	{ uart_rx }	{ LOCATION = F12; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
-set_pin_assignment	{ uart_tx }	{ LOCATION = D12; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+# 串口屏控制（淘晶驰 TJC/Nextion）：D14=uart_rx(入, J1 pin1), G11=uart_tx(出, J1 pin2)
+# 原走板载 CH340 / Type-C（F12/D12），实测不通且原因已确认：CH340 是 USB 从设备，
+# 屏幕的 USB 口也是从设备，C-to-C 线两端都没有 host，永不枚举，线上零字节。
+# 三项对照实验锁定故障在物理链路而非协议：PC↔FPGA 可控制（FPGA 侧全对）、
+# 屏幕↔PC 可见正确 hex（屏幕侧全对）、屏幕↔FPGA 不通。
+# 接线：屏幕 4P TTL 的 TX->J1 pin1、RX->J1 pin2、GND->J1 pin12 或 pin30，VCC 悬空。
+# 注意 J1 在 LVCMOS33 bank，不耐 5V，接前先量屏幕 TX 空闲电平；屏幕自行供电。
+# 退路：把下面两行 LOCATION 改回 F12 / D12 即恢复 Type-C 通路，RTL 一行不必动。
+set_pin_assignment	{ uart_rx }	{ LOCATION = D14; IOSTANDARD = LVCMOS33; PULLTYPE = PULLUP; }
+set_pin_assignment	{ uart_tx }	{ LOCATION = G11; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+# 串口链路诊断 LED（高电平点亮，此前四个 LED 完全未被驱动）
+# led[0]=每收到一个字节翻转 led[1]=最近一个字节是 0xFF led[2]=有一帧被接受并派发 led[3]=恒灭
+set_pin_assignment	{ led[0] }	{ LOCATION = A4; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment	{ led[1] }	{ LOCATION = A3; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment	{ led[2] }	{ LOCATION = C10; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
+set_pin_assignment	{ led[3] }	{ LOCATION = B12; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
 #set_pin_assignment	{ vga_data[0] }	{ LOCATION = F6; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
 #set_pin_assignment	{ vga_data[10] }	{ LOCATION = L8; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }
 #set_pin_assignment	{ vga_data[11] }	{ LOCATION = E13; IOSTANDARD = LVCMOS33; DRIVESTRENGTH = 8; PULLTYPE = NONE; }

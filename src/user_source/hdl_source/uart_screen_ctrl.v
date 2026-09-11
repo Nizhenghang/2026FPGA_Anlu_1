@@ -35,7 +35,9 @@
 // reset would never fire and synthesis would infer a SET alongside the RESET.
 //
 // Stage 1: RX + parse only. uart_tx is held idle high; Stage 2 adds the TX
-// status readback.
+// status readback. Until then dbg_rx_toggle / dbg_rx_ff are the only window
+// onto the link: they are observation-only (they feed nothing but LEDs) and
+// are bring-up aids, not part of the protocol.
 // ---------------------------------------------------------------------------
 
 module uart_screen_ctrl #(
@@ -64,7 +66,12 @@ module uart_screen_ctrl #(
     output reg        cmd_font,               // FONT n: 1 extruded emboss / 0 flat
     output reg        cmd_font_set,
     output reg        cmd_audio,              // MUSC n: 1 TF-card WAV / 0 built-in test tone
-    output reg        cmd_audio_set
+    output reg        cmd_audio_set,
+
+    // ---- link debug: uart_tx is idle-high in Stage 1, so there is no readback
+    // and these two are the only way to see whether bytes reach the FPGA at all.
+    output reg        dbg_rx_toggle,          // flips once per received byte
+    output reg        dbg_rx_ff               // most recent byte was 0xFF
 );
 
     // Stage 1 holds the line idle (high). Stage 2 drives it from a TX engine.
@@ -195,6 +202,8 @@ module uart_screen_ctrl #(
             cmd_font_set           <= 1'b0;
             cmd_audio              <= 1'b0;
             cmd_audio_set          <= 1'b0;
+            dbg_rx_toggle          <= 1'b0;
+            dbg_rx_ff              <= 1'b0;
         end else begin
             // default: every strobe/pulse is high for one clock only
             cmd_next_pulse         <= 1'b0;
@@ -209,6 +218,8 @@ module uart_screen_ctrl #(
             cmd_audio_set          <= 1'b0;
 
             if (rx_valid) begin
+                dbg_rx_toggle <= ~dbg_rx_toggle;
+                dbg_rx_ff     <= (rx_byte == 8'hFF);
                 if (rx_byte == 8'hFF) begin
                     if (ffc == 2'd2) begin
                         // ---- third 0xFF: frame complete, dispatch ----

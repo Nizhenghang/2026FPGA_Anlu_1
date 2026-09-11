@@ -6,8 +6,9 @@ module top(
     input                       key2,           // 自动播放 开/关
     input                       key3,           // 亮度档位循环
     input       [3:0]           sw,             // 拨码开关：sw[2:0] (SW1-3) 选转场特效，sw[3] (SW4) 屏蔽滚动字幕（ON=隐藏，与 SW1-3 极性相反）
-    input                       uart_rx,        // 串口屏 -> FPGA，F12，经板载 CH340/Type-C（PULLUP）
-    output                      uart_tx,        // FPGA -> 串口屏，D12；Stage 1 恒为空闲高
+    input                       uart_rx,        // 串口屏 -> FPGA，D14 (J1 pin1)，4P TTL 飞线（PULLUP）
+    output                      uart_tx,        // FPGA -> 串口屏，G11 (J1 pin2)，飞线；Stage 1 恒为空闲高
+    output      [3:0]           led,            // 链路诊断，高电平点亮，见下面「串口链路诊断 LED」
 
     output [5:0]                seg_sel,
     output [7:0]                seg_data,
@@ -172,6 +173,8 @@ wire        cmd_font;
 wire        cmd_font_set;
 wire        cmd_audio;
 wire        cmd_audio_set;
+wire        dbg_rx_toggle;
+wire        dbg_rx_ff;
 
 // mode/marquee 覆盖：clk 域锁存屏幕设定值，物理拨码一旦变动即清除覆盖
 // （last-writer-wins 兜底，两端互为退路）。ovr_en=0 时下面的 trans_mode /
@@ -395,8 +398,31 @@ uart_screen_ctrl #(
     .cmd_font               (cmd_font),
     .cmd_font_set           (cmd_font_set),
     .cmd_audio              (cmd_audio),
-    .cmd_audio_set          (cmd_audio_set)
+    .cmd_audio_set          (cmd_audio_set),
+    .dbg_rx_toggle          (dbg_rx_toggle),
+    .dbg_rx_ff              (dbg_rx_ff)
 );
+
+// ---- 串口链路诊断 LED（高电平点亮，A4/A3/C10/B12）----
+// uart_tx 在 Stage 1 恒为空闲高，没有任何回读，所以这三只是判断「屏幕到底
+// 有没有把字节送进来」的唯一手段，分三层，逐层收窄故障范围：
+//   LED0 闪  = 有字节到达（接线、共地、电平、波特率都对）
+//   LED1 亮  = 最近一个字节是 0xFF（帧终止符收到了，成帧没问题）
+//   LED2 闪  = 有一帧被接受并派发（关键字、大小写、clen、参数全对）
+// 三只全灭 = 问题在物理链路，不用再查协议；LED0 闪而 LED2 不闪 = 字节进来了
+// 但帧被判非法，去查屏幕端的大小写、尾随空格和终止符。
+// LED3 恒灭，留作后续扩展。
+wire cmd_any_set = cmd_next_pulse | cmd_auto_pulse | cmd_bright_cycle_pulse |
+                   cmd_bright_set_v | cmd_mode_set | cmd_marquee_set |
+                   cmd_img_sel_set | cmd_filt_set | cmd_font_set | cmd_audio_set;
+
+reg led2_toggle;
+always @(posedge clk or posedge rst_all) begin
+    if (rst_all)              led2_toggle <= 1'b0;
+    else if (cmd_any_set)     led2_toggle <= ~led2_toggle;
+end
+
+assign led = {1'b0, led2_toggle, dbg_rx_ff, dbg_rx_toggle};
 
 // mode/marquee 覆盖锁存 + 物理拨码变动检测（clk 域）。屏幕命令置 ovr_en 并锁值；
 // 任一物理拨码变动清 ovr_en，物理路径立即重新接管。复位值匹配 PULLUP 空闲态

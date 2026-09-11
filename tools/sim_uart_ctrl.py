@@ -25,7 +25,7 @@ so no two posedges ever coincide. That makes the CDC sampling realistic: a
 toggle flipped in the clk domain is captured by sd_card_clk on a genuinely
 asynchronous edge, exactly like hardware.
 
-What it verifies (passes A-E)
+What it verifies (passes A-F)
 -----------------------------
   A. RX byte decode at the real divider (CLKS_PER_BIT = 50e6/9600 = 5208):
      a "NEXT" frame arrives as the exact 7 bytes on the wire.
@@ -69,10 +69,19 @@ What it verifies (passes A-E)
          AUDIO_SRC_DEFAULT reset value in both domains, and the physical
          trans_mode branch never exceeds 7 despite the 4-bit wire -- the
          property that keeps the new transitions serial-port-only.
+  F. Link-debug registers behind LEDs A4/A3/C10 (uart_tx has no readback, so
+     these are the only window onto the link). They must be observation-only:
+     zero traffic leaves both at reset and dispatches nothing. Then the three
+     bring-up signatures must be distinguishable -- bytes but no terminator
+     (toggle lit, terminator flag dark), exactly two 0xFF (terminator flag lit,
+     still no dispatch), and a clean frame (all three layers respond). Also
+     locks two framing properties the screen project relies on: contiguous
+     frames with no idle gap both dispatch, and a single inter-frame 0x20
+     sacrifices exactly the next frame and then self-heals.
 
 Honest limits
 -------------
-  * Passes B-E shrink CLKS_PER_BIT to 16 to run fast. The RX FSM and parser are
+  * Passes B-F shrink CLKS_PER_BIT to 16 to run fast. The RX FSM and parser are
      parameter-independent (CPB only sets bit width; a constant 2-cycle
      synchroniser latency shifts every sample point uniformly and stays inside
      each bit window for any CPB > 4), so this is a legitimate speed-up. Pass A
@@ -173,6 +182,8 @@ class System(object):
         s['c0'] = s['c1'] = s['c2'] = s['c3'] = s['c4'] = s['c5'] = 0
         s['clen'] = 0
         s['ffc'] = 0
+        s['dbg_rx_toggle'] = 0
+        s['dbg_rx_ff'] = 0
         s['cmd_next_pulse'] = 0
         s['cmd_auto_pulse'] = 0
         s['cmd_bright_cycle_pulse'] = 0
@@ -327,9 +338,15 @@ class System(object):
             nxt[k] = s[k]
         nxt['clen'] = s['clen']
         nxt['ffc'] = s['ffc']
+        nxt['dbg_rx_toggle'] = s['dbg_rx_toggle']
+        nxt['dbg_rx_ff'] = s['dbg_rx_ff']
 
         if s['rx_valid']:
             b = s['rx_byte']
+            # observation-only, mirrors the RTL: driven before the 0xFF test so it
+            # cannot perturb ffc / clen / any cmd_* effect.
+            nxt['dbg_rx_toggle'] = s['dbg_rx_toggle'] ^ 1
+            nxt['dbg_rx_ff'] = 1 if b == 0xFF else 0
             if b == 0xFF:
                 if s['ffc'] == 2:
                     nxt['ffc'] = 0
@@ -1030,6 +1047,84 @@ def pass_e(res, verbose):
         print("      negative controls complete")
 
 
+# Pass F -- link-debug LED registers, observation-only
+def pass_f(res, verbose):
+    print("=" * 78)
+    print("F. Link-debug LEDs (dbg_rx_toggle / dbg_rx_ff are observation-only)")
+    print("=" * 78)
+
+    # negative control: idle line, zero traffic -> both indicators stay dark and
+    # nothing is dispatched. Proves the debug registers cannot self-trigger.
+    s = System()
+    s.settle(200)
+    res.add(s.st['dbg_rx_toggle'] == 0 and s.st['dbg_rx_ff'] == 0
+            and len(s.log['rx']) == 0 and len(s.log['filt_set']) == 0,
+            "no traffic -> both debug registers stay at reset",
+            "tgl=%d ff=%d rx=%d" % (s.st['dbg_rx_toggle'],
+                                    s.st['dbg_rx_ff'], len(s.log['rx'])))
+
+    # a well-formed 9-byte frame: all three layers respond
+    s = System()
+    s.send(frame("FILT 1"))
+    s.settle(80)
+    res.add(len(s.log['rx']) == 9 and s.st['dbg_rx_toggle'] == 9 % 2
+            and s.st['dbg_rx_ff'] == 1 and s.log['filt_set'] == [1],
+            "clean frame -> byte parity odd, terminator seen, frame accepted",
+            "rx=%d tgl=%d ff=%d filt_set=%s" % (len(s.log['rx']),
+            s.st['dbg_rx_toggle'], s.st['dbg_rx_ff'], s.log['filt_set']))
+
+    # signature 1: bytes arrive but the screen never sent `printh ff ff ff`.
+    # Odd byte count so the toggle indicator ends lit, last byte is payload so
+    # the terminator indicator is dark. On the board: LED0 blinks, LED1 never
+    # lights, LED2 never blinks.
+    s = System()
+    s.send([ord(c) for c in "FILT 1"] + [ord("X")])
+    s.settle(80)
+    res.add(len(s.log['rx']) == 7 and s.st['dbg_rx_toggle'] == 1
+            and s.st['dbg_rx_ff'] == 0 and len(s.log['filt_set']) == 0,
+            "no terminator -> bytes seen, terminator flag dark, no dispatch",
+            "rx=%d tgl=%d ff=%d filt_set=%d" % (len(s.log['rx']),
+            s.st['dbg_rx_toggle'], s.st['dbg_rx_ff'], len(s.log['filt_set'])))
+
+    # signature 2: exactly two 0xFF. The terminator flag is lit (the last byte
+    # really was 0xFF) yet nothing dispatches, because ffc only reaches 2.
+    # On the board: LED0 blinks, LED1 lights, LED2 stays dark.
+    s = System()
+    s.send([ord(c) for c in "FILT 1"] + [0xFF, 0xFF])
+    s.settle(80)
+    res.add(len(s.log['rx']) == 8 and s.st['dbg_rx_ff'] == 1
+            and len(s.log['filt_set']) == 0,
+            "two 0xFF -> terminator flag lit but still no dispatch",
+            "rx=%d ff=%d filt_set=%d" % (len(s.log['rx']),
+            s.st['dbg_rx_ff'], len(s.log['filt_set'])))
+
+    # contiguous frames in ONE send() call, i.e. no idle gap at all between the
+    # two terminators and the next start bit. Both must dispatch.
+    s = System()
+    s.send(frame("FILT 1") + frame("FILT 2"))
+    s.settle(80)
+    res.add(len(s.log['rx']) == 18 and s.log['filt_set'] == [1, 2]
+            and s.st['cmd_filt'] == 2,
+            "back-to-back frames with zero gap both dispatch",
+            "rx=%d filt_set=%s cmd_filt=%d" % (len(s.log['rx']),
+            s.log['filt_set'], s.st['cmd_filt']))
+
+    # a single inter-frame 0x20 shifts the next frame's keyword into c1..c4, so
+    # {c0,c1,c2,c3} == " FIL" and it is silently dropped. Dispatch clears clen
+    # unconditionally, so the frame after that one works: exactly one command is
+    # lost and the link self-heals.
+    s = System()
+    s.send(frame("FILT 1") + [0x20] + frame("FILT 2") + frame("FILT 3"))
+    s.settle(80)
+    res.add(len(s.log['rx']) == 28 and s.log['filt_set'] == [1, 3]
+            and s.st['cmd_filt'] == 3,
+            "inter-frame 0x20 kills exactly the next frame, then self-heals",
+            "rx=%d filt_set=%s cmd_filt=%d" % (len(s.log['rx']),
+            s.log['filt_set'], s.st['cmd_filt']))
+    if verbose:
+        print("      link-debug LED checks complete")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--verbose", action="store_true")
@@ -1040,6 +1135,7 @@ def main():
     pass_c(res, args.verbose)
     pass_d(res, args.verbose)
     pass_e(res, args.verbose)
+    pass_f(res, args.verbose)
     print("=" * 78)
     total = len(res.rows)
     print("%d/%d checks passed, %d failed" % (total - res.failed, total, res.failed))
