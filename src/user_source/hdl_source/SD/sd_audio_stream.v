@@ -1,8 +1,14 @@
 // Stream uncompressed PCM (a canonical 44-byte-header WAV) off the TF card and
 // push stereo frames into an async FIFO that crosses into the video_clk audio
 // domain. Lives in the sd_card_clk domain and shares the single SD sector-read
-// port with bmp_read; sd_card_bmp muxes the port to this module only after all
-// pictures are loaded, so the two consumers are strictly time-disjoint.
+// port with bmp_read through the one-hot arbiter in sd_card_bmp, one sector at a
+// time -- the two consumers are NOT time-disjoint any more, which is what lets
+// the track start on the first picture instead of after the last one.
+//
+// `start` is the audio source select, not just an arm condition: dropping it
+// (the screen sent MUSC 0, so the built-in test tone takes over) retires this
+// module to S_IDLE at the next sector boundary and stops it requesting the port
+// at all, which also gives the picture loads the whole bandwidth back.
 //
 // Contract with the offline tool (doc/convert/convert_audio_to_wav.py):
 //   48000 Hz, stereo, 16-bit little-endian, canonical 44-byte RIFF/WAVE header.
@@ -24,7 +30,10 @@ module sd_audio_stream #(
 )(
     input  wire        clk,             // sd_card_clk (100 MHz)
     input  wire        rst,
-    input  wire        start,           // level: audio phase active
+    input  wire        start,           // level: music source selected. Dropping it
+                                        // retires to S_IDLE at the next sector
+                                        // boundary; re-arming restarts the track
+                                        // from the top (magic_done stays set).
     input  wire [31:0] wav_start_sector,// first data sector (LBA) of the WAV
     input  wire [31:0] wav_size,        // full file size in bytes
 
@@ -163,7 +172,16 @@ always @(posedge clk or posedge rst) begin
                     // same address if sd_sec_read is still high in its wait state)
                     // and advance, exactly like bmp_read's ST_LOAD_DATA.
                     sd_sec_read <= 1'b0;
-                    if (pcm_cnt >= pcm_total) begin
+                    if (!start) begin
+                        // Withdrawn by the audio source select. Retiring here
+                        // rather than the cycle start goes low means the shared
+                        // SD port is handed back at the only point the arbiter in
+                        // sd_card_bmp considers safe, and no granted sector is
+                        // ever left half ingested. Costs at most one sector
+                        // (~184 us) of latency, which is inaudible because the
+                        // top level has already muxed over to the other source.
+                        state <= S_IDLE;
+                    end else if (pcm_cnt >= pcm_total) begin
                         // End of song: rewind for single-track loop. The header is
                         // re-skipped each pass; magic is only checked the first time.
                         sd_sec_read_addr <= wav_start_sector;
@@ -184,7 +202,11 @@ always @(posedge clk or posedge rst) begin
 
             S_WAIT: begin
                 sd_sec_read <= 1'b0;
-                if (!pause_now)
+                // Same withdraw as S_READ's sector boundary; S_WAIT is already
+                // parked with the request low, so this one is immediate.
+                if (!start)
+                    state <= S_IDLE;
+                else if (!pause_now)
                     state <= S_READ;
             end
 

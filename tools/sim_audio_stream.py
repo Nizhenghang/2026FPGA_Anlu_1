@@ -17,6 +17,10 @@ overlaps the last data_valid. The real reader delivers a byte every few clocks
 clock, which is fine because the streamer only acts on data_valid cycles, so the
 frame stream is identical at any byte rate.
 
+Modelled properties: header skip, 4-byte stereo-frame assembly, sector-boundary
+backpressure, the single-track loop, and the MUSC 0 withdraw (start falling while
+a sector is in flight).
+
 HDR_LEN and PAUSE_THRESH are parsed out of the .v file rather than restated here,
 so the model cannot silently drift from the RTL.
 
@@ -212,7 +216,18 @@ class AudioStream(object):
                         pcm_cnt_n = (self.pcm_cnt + 4) & 0xFFFFFFFF
             if end:
                 read_n = 0
-                if self.pcm_cnt >= self.pcm_total:
+                if not start:
+                    # Withdrawn by the audio source select (MUSC 0). Retiring
+                    # here rather than the cycle start goes low hands the shared
+                    # SD port back at the only point the arbiter in sd_card_bmp
+                    # considers safe, and leaves no granted sector half
+                    # ingested. Costs at most one sector of latency, which is
+                    # inaudible because the top level has already muxed over to
+                    # the test tone. The address and pcm_cnt are deliberately
+                    # NOT rewound here: S_IDLE re-initialises both on the next
+                    # start, so a re-arm restarts the track from the top.
+                    state_n = S_IDLE
+                elif self.pcm_cnt >= self.pcm_total:
                     addr_n = self.wav_start_sector      # single-track rewind
                     pcm_cnt_n = 0
                     hdr_skip_n = self.HDR_LEN
@@ -228,7 +243,11 @@ class AudioStream(object):
 
         elif self.state == S_WAIT:
             read_n = 0
-            if not self.pause_now(wrusedw):
+            # Same withdraw as S_READ's sector boundary; S_WAIT is already
+            # parked with the request low, so this one is immediate.
+            if not start:
+                state_n = S_IDLE
+            elif not self.pause_now(wrusedw):
                 state_n = S_READ
 
         elif self.state == S_FAULT:
@@ -350,6 +369,48 @@ def run(stream, reader, cycles, start=1, wrusedw_fn=lambda c: 0, collect=True):
     return words
 
 
+def step_once(st, rd, start, words):
+    """One coupled sd_card_clk with per-cycle visibility.
+
+    Returns (grant_live, end_pulse, request), all sampled at the START of the
+    cycle, because that is what the arbiter in sd_card_bmp sees when it decides
+    whether the port is still audio's. grant_live means the reader is mid
+    transaction on a sector it has already been granted, i.e. arb_aud_own is
+    still set and the port cannot change hands this cycle.
+
+    wrusedw is pinned to 0: the withdraw tests exercise no backpressure.
+    """
+    grant_live = rd.state in (SdReader.DELIVER, SdReader.END)
+    request = st.sd_sec_read
+    data, valid, end = rd.outputs()
+    if words is not None and st.fifo_we:
+        words.append(st.fifo_di)
+    rd.step(st.sd_sec_read, st.sd_sec_read_addr)
+    st.step(start, data, valid, end, 0)
+    return grant_live, end, request
+
+
+def step_immediate_withdraw(st, rd, start, words):
+    """MUTANT of step_once: retire the cycle start goes low instead of waiting
+    for the sector boundary. Same signature and same sampled outputs, so a test
+    can drive both through identical stimulus.
+    """
+    grant_live = rd.state in (SdReader.DELIVER, SdReader.END)
+    request = st.sd_sec_read
+    data, valid, end = rd.outputs()
+    if start == 0 and st.state == S_READ:
+        st.state = S_IDLE
+        st.sd_sec_read = 0
+        st.fifo_we = 0
+        rd.step(0, st.sd_sec_read_addr)
+    else:
+        if words is not None and st.fifo_we:
+            words.append(st.fifo_di)
+        rd.step(st.sd_sec_read, st.sd_sec_read_addr)
+        st.step(start, data, valid, end, 0)
+    return grant_live, end, request
+
+
 # --------------------------------------------------------------------------
 # Tests.
 # --------------------------------------------------------------------------
@@ -466,6 +527,162 @@ def test_control_unusable_size(cfg):
     expect_fail(len(words) > 0, "faulted size emits zero FIFO words")
 
 
+def test_withdraw_and_rearm(cfg):
+    print("\n[7] MUSC 0 withdraw: retire at the sector boundary, replay from the top")
+    start_sector = 0x6000
+    frames = make_frames(400)               # 1600 PCM bytes -> 4 sectors
+    wav = build_wav(frames)
+    card = build_card(wav, start_sector)
+    st = AudioStream(cfg, start_sector, len(wav))
+    rd = SdReader(card)
+    exp = expected_words(frames)
+
+    # --- phase A: stream flat-out until genuinely mid-sector, past the header.
+    run(st, rd, 700)
+    check(st.state == S_READ and st.magic_done == 1 and st.pcm_cnt > 0,
+          "streaming and past the header before the withdraw "
+          "(state=%d pcm_cnt=%d magic_done=%d)"
+          % (st.state, st.pcm_cnt, st.magic_done))
+    check(rd.state == SdReader.DELIVER and 0 < rd.idx < SECTOR - 1,
+          "the reader is part-way through a GRANTED sector when start falls",
+          "reader state=%d idx=%d" % (rd.state, rd.idx))
+    pcm_at_drop = st.pcm_cnt
+    sectors_at_drop = rd.sectors_read
+
+    # --- phase B: start low. The retire must wait for sd_sec_read_end.
+    tail_words, request_held, abandoned = [], [], []
+    c = 0
+    while st.state != S_IDLE and c < 2000:
+        grant_live, _, req = step_once(st, rd, 0, tail_words)
+        if grant_live:
+            request_held.append(req)
+            if not req:
+                abandoned.append(c)
+        c += 1
+    check(st.state == S_IDLE and st.sd_sec_read == 0,
+          "the streamer retires to S_IDLE on the sector's end pulse (%d cycles "
+          "after start fell), not the cycle start goes low" % c)
+    check(len(request_held) > 0 and all(request_held),
+          "the request stays asserted for every cycle of the granted sector "
+          "(%d cycles), so the port is never granted-but-abandoned"
+          % len(request_held),
+          "abandoned on cycles %s" % abandoned)
+    check(len(tail_words) <= FRAMES_PER_SECTOR,
+          "fifo_we is NOT gated by start, so the remainder of the in-flight "
+          "sector still lands in the FIFO: %d stale words (<= %d), which the "
+          "player drains unheard in <= %.1f ms while the tone is muxed in"
+          % (len(tail_words), FRAMES_PER_SECTOR,
+             len(tail_words) / 48000.0 * 1000.0))
+
+    # --- phase C: withdrawn. The streamer must never touch the SD bus again,
+    #     which is the whole point of MUSC 0 -- the pictures get the port alone.
+    we_while_idle = 0
+    for _ in range(3000):
+        _, _, req = step_once(st, rd, 0, None)
+        we_while_idle += st.fifo_we
+        if req:
+            break
+    check(rd.sectors_read == sectors_at_drop,
+          "no new sector is requested while withdrawn (sectors_read frozen at "
+          "%d over 3000 clocks)" % rd.sectors_read,
+          "was %d at the drop" % sectors_at_drop)
+    check(st.state == S_IDLE and st.sd_sec_read == 0 and we_while_idle == 0,
+          "the withdrawn streamer sits silent in S_IDLE and does not spin the "
+          "shared SD port")
+
+    # --- phase D: re-arm. S_IDLE re-initialises pcm_cnt and the address, so the
+    #     track restarts from the top rather than resuming mid-song.
+    check(st.pcm_cnt == pcm_at_drop + 4 * len(tail_words),
+          "the withdraw deliberately does NOT rewind pcm_cnt: at S_IDLE it is "
+          "%d, exactly the %d it had when start fell plus the %d stale words "
+          "the in-flight sector still produced"
+          % (st.pcm_cnt, pcm_at_drop, len(tail_words)))
+    step_once(st, rd, 1, None)
+    check(st.pcm_cnt == 0 and st.sd_sec_read_addr == start_sector
+          and st.state == S_READ,
+          "one cycle after re-arm pcm_cnt is 0 and the address is back at "
+          "wav_start_sector (%d)" % st.sd_sec_read_addr)
+    words = []
+    for _ in range(3200):
+        step_once(st, rd, 1, words)
+    check(words[:len(frames)] == exp,
+          "the re-armed replay reproduces the whole track exactly and "
+          "frame-aligned -> it restarted from byte 0, not from the drop point")
+
+    # --- phase E: magic_done is sticky. Withdraw once more, trash the header on
+    #     the card, and re-arm: RIFF/WAVE must NOT be re-verified.
+    guard = 0
+    while st.state != S_IDLE and guard < 4000:
+        step_once(st, rd, 0, None)
+        guard += 1
+    trashed = bytearray(card[start_sector])
+    trashed[0:12] = b"XXXXYYYYZZZZ"
+    card[start_sector] = bytes(trashed)
+    words = []
+    for _ in range(3200):
+        step_once(st, rd, 1, words)
+    check(st.state != S_FAULT and st.magic_done == 1,
+          "a corrupted header on replay is not re-checked: magic_done stays 1 "
+          "and the streamer never faults", "state=%d" % st.state)
+    check(words[:len(frames)] == exp,
+          "so MUSC 0 -> MUSC 1 always replays the same clean track, however "
+          "often it is toggled")
+
+
+def test_control_midsector_retire(cfg):
+    print("\n[8] NEGATIVE CONTROL: a mid-sector retire loses the granted sector")
+    # A short de-arm pulse, driven identically through the real boundary retire
+    # and through the mutant that gives up the cycle start goes low. The real one
+    # absorbs it without losing a single audio byte. The mutant abandons a sector
+    # the arbiter has already granted, then on re-arm mistakes that sector's end
+    # pulse for its own, so it skips sector 0 entirely: the header is never read
+    # and every frame from the pulse onward is misaligned -- silently, because
+    # magic_done is already 1.
+    start_sector = 0x7000
+    frames = make_frames(400)
+    wav = build_wav(frames)
+    exp = expected_words(frames)
+    PULSE = 3
+
+    def drive(stepfn):
+        card = build_card(wav, start_sector)
+        st = AudioStream(cfg, start_sector, len(wav))
+        rd = SdReader(card)
+        words, abandoned = [], 0
+        mid = False
+        for i in range(700 + PULSE + 3200):
+            start = 0 if 700 <= i < 700 + PULSE else 1
+            if i == 700:
+                mid = (rd.state == SdReader.DELIVER and 0 < rd.idx < SECTOR - 1)
+            grant_live, _, req = stepfn(st, rd, start, words)
+            if grant_live and not req:
+                abandoned += 1
+        return st, words, abandoned, mid
+
+    st_r, words_r, abn_r, mid_r = drive(step_once)
+    st_m, words_m, abn_m, mid_m = drive(step_immediate_withdraw)
+
+    check(mid_r and mid_m,
+          "both runs are part-way through a granted sector when the %d-cycle "
+          "de-arm pulse lands" % PULSE)
+    check(abn_r == 0,
+          "real: the request is high on every cycle the arbiter still holds the "
+          "port for audio (0 abandoned cycles)")
+    expect_fail(abn_m == 0,
+                "mutant: retiring mid-sector leaves %d cycles where the port is "
+                "granted to audio but audio is no longer asking for it" % abn_m)
+    check(words_r[:len(frames)] == exp,
+          "real: a %d-cycle de-arm glitch costs nothing -- all %d frames still "
+          "come out exactly right" % (PULSE, len(frames)))
+    expect_fail(words_m[:len(frames)] == exp,
+                "mutant: the same glitch corrupts the stream from frame %d "
+                "onward" % next((i for i in range(len(frames))
+                                 if words_m[i] != exp[i]), -1))
+    expect_fail(st_m.state == S_FAULT,
+                "mutant: the damage is SILENT garbage, not a fault -- magic_done "
+                "is already 1 so the skipped header is never noticed")
+
+
 def main():
     print("=" * 72)
     print("sd_audio_stream.v cycle-accurate model")
@@ -480,6 +697,8 @@ def main():
     test_control_misalign(cfg)
     test_control_bad_magic(cfg)
     test_control_unusable_size(cfg)
+    test_withdraw_and_rearm(cfg)
+    test_control_midsector_retire(cfg)
 
     print("\n" + "=" * 72)
     if FAILURES:

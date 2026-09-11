@@ -44,6 +44,16 @@ Passes (Gate 2 of the plan):
      cell_idx slice narrowed to u[9:4], E2 row without the ROW_LSB
      subtraction, E3 glyph_bits[gcol] instead of [23-gcol], E4 marq_pos
      advancing every frame, E5 I_en dropped from in_band.
+  F  The extruded emboss behind I_3d. F1 I_3d=0 is bit-identical to the flat
+     design for every band pixel -- that is the retreat FONT 0 depends on. F2
+     with I_3d=1 the face keeps its colour and the two thickness layers are
+     exactly the golden face mask translated down-right by 1 and 2 px, in the
+     priority order face > ext1 > ext2, with every other band pixel unchanged;
+     the mask comes from gen.band_pixel over x = -2..641 so a glyph partly off
+     screen still casts thickness onto column 0. F3 rows BAND_TEXT_Y_LAST+1/+2
+     really do grow thickness while +3 stays flat, which is what the widened
+     row gates buy. F4 controls: the I_3d gate dropped, offsets (1,1)/(3,3),
+     the two arms swapped, and the gates left at in_text_rows.
 
 Run from anywhere:  python tools/sim_marquee.py
 """
@@ -149,6 +159,10 @@ REQUIRED_PARAMS = (
 REQUIRED_WIDTHS = (
     "x_pos", "y_pos", "marq_pos", "frame_div", "s", "u", "cell_idx", "col",
     "gcol", "row", "glyph_bits",
+    # the two extruded-emboss layers; Pass F asserts each is the same width as
+    # its face counterpart, since they are a pure translation of the same math
+    "u_e1", "cell_idx_e1", "col_e1", "gcol_e1", "row_e1", "glyph_e1",
+    "u_e2", "cell_idx_e2", "col_e2", "gcol_e2", "row_e2", "glyph_e2",
 )
 
 
@@ -201,7 +215,138 @@ def match_or_stale(pattern, text, what):
     return m
 
 
-def parse_ops(code, cfg):
+def parse_extrusion(code, cfg, ops, widths, tag, off):
+    """One thickness layer of the extruded emboss, as structured data.
+
+    `tag` is the RTL suffix ("e1"/"e2") and `off` the down-right offset in
+    pixels the layer is supposed to implement. Every number is lifted out of
+    the .v file; nothing is restated here.
+
+    A layer is meant to be a pure translation of the face, so each structural
+    element is cross-checked against the face ops parsed so far. If a layer
+    stops being one -- a different slice, a different gutter, an offset that
+    does not match its own row subtraction -- the model is stale and says so,
+    rather than quietly simulating the translation the parser expected.
+    """
+    L = {}
+
+    for sig, face_w in (("u", "u"), ("cell_idx", "cell_idx"), ("col", "col"),
+                        ("gcol", "gcol"), ("row", "row"), ("glyph", "glyph_bits")):
+        name = "%s_%s" % (sig, tag)
+        if widths[name] != widths[face_w]:
+            stale("%s is %d bits, the face's %s is %d"
+                  % (name, widths[name], face_w, widths[face_w]))
+
+    txt = assign_rhs(code, "u_" + tag)
+    got = int(match_or_stale(r"u\s*-\s*11'd(\d+)", txt,
+                             "u_%s = u - 11'd<off>" % tag).group(1))
+    if got != off:
+        stale("u_%s subtracts %d, this layer is meant to offset by %d"
+              % (tag, got, off))
+    L["u_off"] = got
+
+    txt = assign_rhs(code, "in_region_" + tag)
+    name = match_or_stale(r"\(?\s*u_%s\s*<\s*(\w+)\s*\)?" % tag, txt,
+                          "in_region_%s = u_%s < <const>" % (tag, tag)).group(1)
+    if cfg[name] != ops["region_lt"]:
+        stale("in_region_%s compares against %d, the face against %d"
+              % (tag, cfg[name], ops["region_lt"]))
+    L["region_lt"] = cfg[name]
+
+    for sig, key in (("cell_idx", "cell_slice"), ("col", "col_slice")):
+        txt = assign_rhs(code, "%s_%s" % (sig, tag))
+        got = tuple(int(g) for g in match_or_stale(
+            r"u_%s\[\s*(\d+)\s*:\s*(\d+)\s*\]" % tag, txt,
+            "%s_%s = u_%s[hi:lo]" % (sig, tag, tag)).groups())
+        if got != ops[key]:
+            stale("%s_%s slices u%s, the face slices %s"
+                  % (sig, tag, list(got), list(ops[key])))
+        L[key] = got
+
+    txt = assign_rhs(code, "col_in_glyph_" + tag)
+    lo_name, hi_name = match_or_stale(
+        r"\(?\s*col_%s\s*>=\s*(\w+)\s*\)?\s*&&\s*\(?\s*col_%s\s*<=\s*(\w+)\s*\)?"
+        % (tag, tag), txt,
+        "col_in_glyph_%s = (col_%s >= <lo>) && (col_%s <= <hi>)"
+        % (tag, tag, tag)).groups()
+    if (cfg[lo_name], cfg[hi_name]) != (ops["col_lo"], ops["col_hi"]):
+        stale("col_in_glyph_%s keeps a different gutter than the face" % tag)
+    L["col_lo"], L["col_hi"] = cfg[lo_name], cfg[hi_name]
+
+    txt = assign_rhs(code, "gcol_" + tag)
+    gsub = cfg[match_or_stale(r"col_%s\s*-\s*(\w+)" % tag, txt,
+                              "gcol_%s = col_%s - <const>" % (tag, tag)).group(1)]
+    if gsub != ops["gcol_sub"]:
+        stale("gcol_%s subtracts %d, the face subtracts %d"
+              % (tag, gsub, ops["gcol_sub"]))
+    L["gcol_sub"] = gsub
+
+    # row_eN = y_pos[hi:lo] - ROW_LSB - <off>. The extra subtraction has to be
+    # the same number u_eN subtracts: that is what makes the layer a diagonal
+    # translation instead of a horizontal or a vertical smear.
+    txt = assign_rhs(code, "row_" + tag)
+    hi, lo, name, extra = match_or_stale(
+        r"y_pos\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*-\s*(\w+)\s*-\s*5'd(\d+)", txt,
+        "row_%s = y_pos[hi:lo] - <const> - 5'd<off>" % tag).groups()
+    if (int(hi), int(lo)) != ops["row_slice"] or cfg[name] != ops["row_sub"]:
+        stale("row_%s is not the face's row expression minus a constant" % tag)
+    if int(extra) != off:
+        stale("row_%s subtracts an extra %s but u_%s offsets by %d, so the "
+              "thickness would not stay glued to the face"
+              % (tag, extra, tag, off))
+    L["row_extra"] = int(extra)
+
+    # The gate must be wider than in_text_rows -- the extrusion reaches past the
+    # last face row and clipping it there shears the 3D flat at the bottom -- and
+    # the extra rows must be *derived* from BAND_TEXT_Y_LAST rather than written
+    # down a second time, so a future geometry change cannot leave them behind.
+    txt = assign_rhs(code, "in_%s_rows" % tag)
+    lo_name, hi_name, wid = match_or_stale(
+        r"\(?\s*y_pos\s*>=\s*(\w+)\s*\)?\s*&&\s*"
+        r"\(?\s*y_pos\s*<=\s*(\w+)\s*\+\s*10'd(\d+)\s*\)?", txt,
+        "in_%s_rows = (y_pos >= <lo>) && (y_pos <= <hi> + <n>)" % tag).groups()
+    if cfg[lo_name] != ops["text_rows"][0]:
+        stale("in_%s_rows opens at %d, the face at %d"
+              % (tag, cfg[lo_name], ops["text_rows"][0]))
+    if cfg[hi_name] != ops["text_rows"][1]:
+        stale("in_%s_rows does not derive its top from BAND_TEXT_Y_LAST" % tag)
+    if int(wid) != off:
+        stale("in_%s_rows widens by %s but the layer offsets by %d"
+              % (tag, wid, off))
+    L["rows"] = (cfg[lo_name], cfg[hi_name] + int(wid))
+    L["rows_widen"] = int(wid)
+
+    txt = assign_rhs(code, "glyph_" + tag)
+    cell_name, chi, clo, row_name = match_or_stale(
+        r"marquee_glyph\(\s*(\w+)\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*,\s*(\w+)\s*\)",
+        txt, "glyph_%s = marquee_glyph(cell_idx_%s[hi:lo], row_%s)"
+        % (tag, tag, tag)).groups()
+    if cell_name != "cell_idx_" + tag or row_name != "row_" + tag:
+        stale("marquee_glyph for layer %s is fed %s/%s" % (tag, cell_name, row_name))
+    mask = (1 << (int(chi) - int(clo) + 1)) - 1
+    if mask != ops["cell_arg_mask"]:
+        stale("layer %s masks cell_idx to %#x, the face to %#x"
+              % (tag, mask, ops["cell_arg_mask"]))
+    L["cell_arg_mask"] = mask
+
+    txt = assign_rhs(code, "ext%d_on" % off)
+    width, const, gcol_name = match_or_stale(
+        r"in_%s_rows\s*&&\s*in_region_%s\s*&&\s*col_in_glyph_%s\s*&&\s*"
+        r"glyph_%s\[\s*(\d+)\s*'d\s*(\d+)\s*-\s*(\w+)\s*\]" % (tag, tag, tag, tag),
+        txt, "ext%d_on = in_%s_rows && in_region_%s && col_in_glyph_%s && "
+        "glyph_%s[N'd<hi> - gcol_%s]" % (off, tag, tag, tag, tag, tag)).groups()
+    if gcol_name != "gcol_" + tag:
+        stale("layer %s indexes its glyph by %s, expected gcol_%s"
+              % (tag, gcol_name, tag))
+    if (int(width), int(const)) != (ops["index_width"], ops["index_msb"]):
+        stale("layer %s indexes glyph bits as %s'd%d, the face as %s'd%d"
+              % (tag, width, int(const), ops["index_width"], ops["index_msb"]))
+    L["index_width"], L["index_msb"] = int(width), int(const)
+
+    return L
+
+
+def parse_ops(code, cfg, widths):
     """The combinational heart of the module, as structured data."""
     ops = {}
 
@@ -291,12 +436,21 @@ def parse_ops(code, cfg):
     txt = assign_rhs(code, "O_rgb")
     if not txt.startswith("!in_band ? I_rgb"):
         stale("O_rgb must pass I_rgb through outside the band: %s" % txt)
-    text_hex, edge_hex = match_or_stale(
+    # Six arms now: the two emboss layers sit between the face and the band
+    # edge, and both are gated by I_3d. That gate is the whole retreat story --
+    # with I_3d low the mux must collapse to exactly the flat four-arm design.
+    text_hex, ext1_hex, ext2_hex, edge_hex = match_or_stale(
         r"!in_band \? I_rgb :\s*text_on \? (\d+'h[0-9A-Fa-f]+) :\s*"
-        r"band_edge \? (\d+'h[0-9A-Fa-f]+) :\s*\{\s*dim_r\s*,\s*dim_g\s*,\s*dim_b\s*\}",
-        txt, "the 4-way output mux").groups()
+        r"\(I_3d && ext1_on\) \? (\d+'h[0-9A-Fa-f]+) :\s*"
+        r"\(I_3d && ext2_on\) \? (\d+'h[0-9A-Fa-f]+) :\s*"
+        r"band_edge \? (\d+'h[0-9A-Fa-f]+) :\s*"
+        r"\{\s*dim_r\s*,\s*dim_g\s*,\s*dim_b\s*\}",
+        txt, "the 6-way output mux, face > I_3d-gated ext1 > ext2 > edge").groups()
     ops["text_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, text_hex))
+    ops["ext1_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, ext1_hex))
+    ops["ext2_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, ext2_hex))
     ops["edge_rgb"] = int(_LITERAL_RE.sub(_literal_to_py, edge_hex))
+    ops["ext_rgb"] = (ops["ext1_rgb"], ops["ext2_rgb"])
 
     for ch, bits in (("r", "[23:16]"), ("g", "[15:8]"), ("b", "[7:0]")):
         txt = assign_rhs(code, "dim_" + ch)
@@ -304,6 +458,10 @@ def parse_ops(code, cfg):
                        "dim_%s = I_rgb%s >> DIM_SHIFT" % (ch, bits))
         if cfg[txt.split(">>")[1].strip()] != cfg["DIM_SHIFT"]:
             stale("dim_%s shifts by something other than DIM_SHIFT" % ch)
+
+    # Mux order, which is also the priority order Pass F asserts.
+    ops["ext_layers"] = [parse_extrusion(code, cfg, ops, widths, "e1", 1),
+                         parse_extrusion(code, cfg, ops, widths, "e2", 2)]
 
     return ops
 
@@ -345,7 +503,7 @@ def parse_rtl(path=RTL):
     code = strip_comments(raw)
     cfg = parse_params(code, path)
     widths = parse_widths(code, path)
-    ops = parse_ops(code, cfg)
+    ops = parse_ops(code, cfg, widths)
     return cfg, widths, ops, raw
 
 
@@ -426,6 +584,10 @@ class Marquee(object):
         self.en_gates_band = ops["en_gates_band"]
         self.bit_order_reversed = False
         self.frame_div_last = cfg["FRAME_DIV_LAST"]
+        self.ext_offsets = [(L["u_off"], L["row_extra"]) for L in ops["ext_layers"]]
+        self.ext_needs_i3d = True
+        self.ext_rows_widened = True
+        self.ext_priority_swapped = False
         self.reset()
 
     def reset(self):
@@ -462,7 +624,22 @@ class Marquee(object):
     def glyph(self, cell, row):
         return self.font.get(cell & self.ops["cell_arg_mask"], {}).get(row, 0)
 
-    def comb(self, de, rgb, en):
+    def _layer_ink(self, ux, row_x, L):
+        """in_region && col_in_glyph && the glyph bit, for one offset layer."""
+        if not ux < L["region_lt"]:
+            return False
+        col_x = self._slice(ux, *L["col_slice"])
+        if not (L["col_lo"] <= col_x <= L["col_hi"]):
+            return False
+        gcol_x = (col_x - L["gcol_sub"]) & self.mask5
+        if self.bit_order_reversed:
+            index = gcol_x & ((1 << L["index_width"]) - 1)
+        else:
+            index = (L["index_msb"] - gcol_x) & ((1 << L["index_width"]) - 1)
+        bits = self.glyph(self._slice(ux, *L["cell_slice"]), row_x)
+        return bool((bits >> index) & 1) if index < self.widths["glyph_bits"] else False
+
+    def comb(self, de, rgb, en, i3d=0):
         """Returns (O_rgb, diagnostics). Pure function of registers + inputs."""
         cfg, ops = self.cfg, self.ops
         x, y = self.x_pos, self.y_pos
@@ -490,26 +667,50 @@ class Marquee(object):
         if self.gate_rows:
             text_on = text_on and in_text_rows
 
+        # The two thickness layers, each a pure diagonal translation of the face:
+        # u_eN = u - off on the same 11 bit wire, row_eN = row - off on the same
+        # 5 bit wire. Both wrap, and a wrapped row lands in marquee_glyph's
+        # default arm, i.e. no ink -- which is why no extra bounds test is needed.
+        ext = []
+        for L, (u_off, row_extra) in zip(ops["ext_layers"], self.ext_offsets):
+            ux = (u - u_off) & self.mask_pos
+            row_x = (row - row_extra) & self.mask5
+            on = self._layer_ink(ux, row_x, L)
+            rows = L["rows"] if self.ext_rows_widened else ops["text_rows"]
+            ext.append(on and rows[0] <= y <= rows[1])
+        ext1_on, ext2_on = ext
+
         shift = cfg["DIM_SHIFT"]
         dim = (((rgb >> 16) & 0xFF) >> shift) << 16 \
             | (((rgb >> 8) & 0xFF) >> shift) << 8 \
             | ((rgb & 0xFF) >> shift)
 
+        arms = [(ext1_on, ops["ext1_rgb"]), (ext2_on, ops["ext2_rgb"])]
+        if self.ext_priority_swapped:
+            arms.reverse()
+        emboss = bool(i3d) or not self.ext_needs_i3d
+
         if not in_band:
             out = rgb
         elif text_on:
             out = ops["text_rgb"]
-        elif band_edge:
-            out = ops["edge_rgb"]
         else:
-            out = dim
+            out = None
+            if emboss:
+                for on, colour in arms:
+                    if on:
+                        out = colour
+                        break
+            if out is None:
+                out = ops["edge_rgb"] if band_edge else dim
 
         diag = {"x": x, "y": y, "in_band": in_band, "band_edge": band_edge,
                 "in_text_rows": in_text_rows, "frame_wrap": frame_wrap,
                 "s": s, "u": u, "in_region": in_region, "cell": cell,
                 "col": col, "col_in_glyph": col_in_glyph, "gcol": gcol,
                 "row": row, "bits": bits, "index": index,
-                "text_on": text_on, "dim": dim}
+                "text_on": text_on, "dim": dim,
+                "ext1_on": ext1_on, "ext2_on": ext2_on, "emboss": emboss}
         return out, diag
 
     def step(self, de):
@@ -600,6 +801,42 @@ class _BrokenBitOrder(Marquee):
     def __init__(self, *a, **kw):
         Marquee.__init__(self, *a, **kw)
         self.bit_order_reversed = True
+
+
+class _BrokenExtUngated(Marquee):
+    """I_3d dropped from both extrusion arms: the emboss is permanently on, so
+    FONT 0 can no longer retreat to the flat design."""
+
+    def __init__(self, *a, **kw):
+        Marquee.__init__(self, *a, **kw)
+        self.ext_needs_i3d = False
+
+
+class _BrokenExtOffsets(Marquee):
+    """Thickness grown by (1,1) and (3,3) instead of (1,1) and (2,2): the second
+    layer leaves a gap, so the extrusion reads as two outlines, not as depth."""
+
+    def __init__(self, *a, **kw):
+        Marquee.__init__(self, *a, **kw)
+        self.ext_offsets = [(1, 1), (3, 3)]
+
+
+class _BrokenExtPriority(Marquee):
+    """ext2 tested before ext1: the darker far layer wins wherever they overlap,
+    so the near step disappears and the emboss looks inverted."""
+
+    def __init__(self, *a, **kw):
+        Marquee.__init__(self, *a, **kw)
+        self.ext_priority_swapped = True
+
+
+class _BrokenExtRowGate(Marquee):
+    """Both extrusion gates left at in_text_rows: the thickness is sheared off
+    at BAND_TEXT_Y_LAST and the 3D ends in a flat horizontal cut."""
+
+    def __init__(self, *a, **kw):
+        Marquee.__init__(self, *a, **kw)
+        self.ext_rows_widened = False
 
 
 # ---------------------------------------------------------------------------
@@ -984,7 +1221,7 @@ def rgb_int(rgb):
     return (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]
 
 
-def capture_band(m, cfg, pos, bg_fn, en=1):
+def capture_band(m, cfg, pos, bg_fn, en=1, i3d=0):
     """Run BAND_H real lines from the top of the band, capturing every pixel."""
     m.preset(x_pos=0, y_pos=cfg["BAND_Y_W"], de_d=0, marq_pos=pos)
     rows = {}
@@ -992,7 +1229,7 @@ def capture_band(m, cfg, pos, bg_fn, en=1):
         y = m.y_pos
         row = []
         for x in range(cfg["H_ACTIVE"]):
-            out, diag = m.comb(1, rgb_int(bg_fn(x, y)), en)
+            out, diag = m.comb(1, rgb_int(bg_fn(x, y)), en, i3d)
             row.append((out, diag))
             m.step(1)
         m.step(0)                      # falling edge: y_pos advances
@@ -1162,6 +1399,190 @@ def test_pass_e(cfg, widths, ops, font):
 
 
 # ---------------------------------------------------------------------------
+# Pass F -- extruded emboss (I_3d)
+# ---------------------------------------------------------------------------
+def golden_face_mask(cfg, font, pos, bg_fn, pad=2):
+    """Where the golden model puts the glyph face, over x = -pad .. H_ACTIVE+pad-1.
+
+    Extended past both edges of the raster because the emboss samples the face
+    at x-1 and x-2: a glyph that has only just entered still casts thickness
+    onto column 0, and a mask clipped at x=0 would wrongly expect nothing there.
+    band_pixel takes u modulo 2**POS_BITS, so negative x wraps exactly like the
+    11 bit wire does.
+    """
+    return {y: {x: gen.band_pixel(x, y, pos, bg_fn(x, y), font) == gen.TEXT_RGB
+                for x in range(-pad, cfg["H_ACTIVE"] + pad)}
+            for y in range(cfg["BAND_Y"], cfg["BAND_Y_LAST"] + 1)}
+
+
+def test_pass_f(cfg, widths, ops, font):
+    print("\n[F] extruded emboss behind I_3d")
+
+    white = (0xFF, 0xFF, 0xFF)
+
+    def bg(x, y):
+        return white
+
+    positions = [0, 1, 2, 32, 240, 639, 640, 700, 820, cfg["TRAVEL"] - 1]
+    good = Marquee(cfg, widths, ops, font)
+    ext1_rgb, ext2_rgb = ops["ext_rgb"]
+    last = cfg["BAND_TEXT_Y_LAST"]
+
+    for i, L in enumerate(ops["ext_layers"]):
+        print("    parsed layer ext%d: u - %d, row - %d, rows y %d..%d "
+              "(in_text_rows widened by %d), 24'h%06X"
+              % (i + 1, L["u_off"], L["row_extra"], L["rows"][0], L["rows"][1],
+                 L["rows_widen"], ops["ext_rgb"][i]))
+
+    # F1 -- the retreat FONT 0 depends on: with I_3d low the module must be the
+    # flat design, not merely a design that looks similar.
+    for pos in positions:
+        rows = capture_band(good, cfg, pos, bg, i3d=0)
+        bad = [(x, y, out) for y in sorted(rows)
+               for x, (out, _d) in enumerate(rows[y])
+               if out != rgb_int(gen.band_pixel(x, y, pos, white, font))]
+        check(not bad,
+              "F1 I_3d=0 at marq_pos=%4d renders the flat design bit for bit "
+              "(%d px)" % (pos, cfg["BAND_H"] * cfg["H_ACTIVE"]),
+              "%s ..." % bad[:3])
+
+    # F2 -- with I_3d high the face keeps its colour and each thickness layer is
+    # exactly the golden face mask translated down-right by its own offset, in
+    # the mux's priority order. Every pixel the emboss does not claim must keep
+    # the colour the flat render gave it, which is what makes this a whole-band
+    # statement rather than a statement about the glyph pixels alone.
+    totals = [0, 0, 0]
+    for pos in positions:
+        face = golden_face_mask(cfg, font, pos, bg)
+        flat = capture_band(good, cfg, pos, bg, i3d=0)
+        rows = capture_band(good, cfg, pos, bg, i3d=1)
+        bad, n = [], [0, 0, 0]
+        for y in sorted(rows):
+            for x, (out, _d) in enumerate(rows[y]):
+                if face[y][x]:
+                    want, n[0] = ops["text_rgb"], n[0] + 1
+                elif face.get(y - 1, {}).get(x - 1, False):
+                    want, n[1] = ext1_rgb, n[1] + 1
+                elif face.get(y - 2, {}).get(x - 2, False):
+                    want, n[2] = ext2_rgb, n[2] + 1
+                else:
+                    want = flat[y][x][0]
+                if out != want and len(bad) < 5:
+                    bad.append("(x=%d,y=%d) got 24'h%06X want 24'h%06X"
+                               % (x, y, out, want))
+        totals = [a + b for a, b in zip(totals, n)]
+        check(not bad,
+              "F2 I_3d=1 at marq_pos=%4d: %d face + %d near + %d far px follow "
+              "the translated golden mask, rest untouched"
+              % (pos, n[0], n[1], n[2]),
+              "%s ..." % ", ".join(bad))
+    check(all(totals),
+          "F2 over %d positions the emboss drew %d face, %d near-step and %d "
+          "far-step pixels" % (len(positions), totals[0], totals[1], totals[2]),
+          "a layer never fired anywhere: %s" % totals)
+
+    # F3 -- the widened row gates are load-bearing, and exactly tall enough.
+    # The lowest row the emboss can reach is BAND_TEXT_Y + <last inked glyph
+    # row> + 2. That last number is measured out of the font, not assumed, so a
+    # future descender re-arms this check instead of leaving it silently
+    # vacuous -- and so it says plainly when a widening buys nothing today.
+    last_ink = max(r for c in font.values() for r, bits in c.items() if bits)
+    bottom = cfg["BAND_TEXT_Y"] + last_ink + ops["ext_layers"][-1]["u_off"]
+    gate_top = ops["ext_layers"][-1]["rows"][1]
+    check(last_ink < cfg["CELL"],
+          "F3 glyph row %d is the last with any ink, inside the %d row box"
+          % (last_ink, cfg["CELL"]),
+          "row %d is outside the box" % last_ink)
+    check(bottom > cfg["BAND_TEXT_Y_LAST"],
+          "F3 the emboss bottoms out at y=%d, %d rows past in_text_rows' top "
+          "y=%d -- a gate left at BAND_TEXT_Y_LAST would shear it off"
+          % (bottom, bottom - cfg["BAND_TEXT_Y_LAST"], cfg["BAND_TEXT_Y_LAST"]))
+    check(bottom <= gate_top,
+          "F3 the far gate reaches y=%d, enough for the emboss' lowest row y=%d"
+          % (gate_top, bottom),
+          "the font outgrew the gate -- widen in_e2_rows")
+
+    pos = 700
+    flat = capture_band(good, cfg, pos, bg, i3d=0)
+    rows = capture_band(good, cfg, pos, bg, i3d=1)
+
+    for i, L in enumerate(ops["ext_layers"]):
+        y = cfg["BAND_TEXT_Y"] + last_ink + L["u_off"]
+        if not cfg["BAND_Y"] <= y <= cfg["BAND_Y_LAST"]:
+            where = "off the band"
+        else:
+            n = sum(1 for x in range(cfg["H_ACTIVE"])
+                    if rows[y][x][1]["ext%d_on" % (i + 1)])
+            if not n:
+                where = ("empty -- insurance until the font grows a row %d"
+                         % (cfg["CELL"] - 1))
+            elif y > cfg["BAND_TEXT_Y_LAST"]:
+                where = "%d px, and only because the gate was widened" % n
+            else:
+                where = ("%d px, already inside in_text_rows -- the widening is "
+                         "insurance" % n)
+        print("      ext%d's lowest ink row is y=%d, gate top y=%d: %s"
+              % (i + 1, y, L["rows"][1], where))
+
+    for y in range(cfg["BAND_TEXT_Y_LAST"] + 1, gate_top + 2):
+        grew = [x for x in range(cfg["H_ACTIVE"])
+                if rows[y][x][0] != flat[y][x][0]]
+        if y <= bottom:
+            check(bool(grew),
+                  "F3 y=%d is at or above the emboss' lowest row and grows %d px "
+                  "of thickness, so the gate really was widened" % (y, len(grew)),
+                  "identical to the flat render -- the bottom is sheared off")
+            stray = [x for x in grew if rows[y][x][0] not in ops["ext_rgb"]]
+            check(not stray,
+                  "F3 y=%d: all %d new pixels are one of the two thickness "
+                  "colours" % (y, len(grew)),
+                  "x=%s got %s"
+                  % (stray[:3],
+                     ["24'h%06X" % rows[y][x][0] for x in stray[:3]]))
+        else:
+            check(not grew,
+                  "F3 y=%d is below the emboss' lowest row y=%d and stays "
+                  "exactly flat" % (y, bottom),
+                  "%d px changed: %s" % (len(grew), grew[:5]))
+    check(bottom < cfg["BAND_Y_LAST"],
+          "F3 the emboss bottoms out at y=%d, above the band's bottom edge row "
+          "y=%d, so it never collides with band_edge"
+          % (bottom, cfg["BAND_Y_LAST"]))
+
+    # F4 -- controls. Each must change the rendered band.
+    def diff(cls, i3d, ref):
+        got = capture_band(cls(cfg, widths, ops, font), cfg, pos, bg, i3d=i3d)
+        return sum(1 for yy in sorted(got) for x in range(cfg["H_ACTIVE"])
+                   if got[yy][x][0] != ref[yy][x][0])
+
+    n = diff(_BrokenExtUngated, 0, flat)
+    expect_fail(n == 0,
+                "F4 dropping the I_3d gate leaves the emboss on screen at "
+                "I_3d=0, so FONT 0 could not retreat (%d px differ)" % n)
+
+    n = diff(_BrokenExtOffsets, 1, rows)
+    expect_fail(n == 0,
+                "F4 offsets (1,1)/(3,3) instead of (1,1)/(2,2) break the "
+                "diagonal translation (%d px differ)" % n)
+
+    overlap = sum(1 for yy in sorted(rows) for x, (_o, d) in enumerate(rows[yy])
+                  if d["ext1_on"] and d["ext2_on"] and not d["text_on"])
+    check(overlap > 0,
+          "F4 %d band pixels carry both thickness layers, so the mux priority "
+          "is observable at all" % overlap,
+          "none -- the swap control below would be vacuous")
+    n = diff(_BrokenExtPriority, 1, rows)
+    expect_fail(n == 0,
+                "F4 testing ext2 before ext1 hands the overlap to the darker "
+                "far layer (%d px differ)" % n)
+
+    n = diff(_BrokenExtRowGate, 1, rows)
+    expect_fail(n == 0,
+                "F4 leaving both gates at in_text_rows shears the emboss off at "
+                "y=%d (%d px differ)" % (last, n))
+
+
+# ---------------------------------------------------------------------------
 def main():
     print("=" * 72)
     print("marquee_overlay.v cycle-accurate model")
@@ -1176,6 +1597,9 @@ def main():
     print("font table     : %s (%d cells, %d non-zero rows)"
           % (os.path.basename(VH), len(font),
              sum(1 for c in font.values() for b in c.values() if b)))
+    print("output mux     : face 24'h%06X > I_3d ext1 24'h%06X > I_3d ext2 "
+          "24'h%06X > edge 24'h%06X > dim"
+          % (ops["text_rgb"], ops["ext1_rgb"], ops["ext2_rgb"], ops["edge_rgb"]))
 
     m = Marquee(cfg, widths, ops, font)
 
@@ -1184,6 +1608,7 @@ def main():
     test_pass_c(m, cfg, ops)
     test_pass_d(m, cfg, font)
     test_pass_e(cfg, widths, ops, font)
+    test_pass_f(cfg, widths, ops, font)
 
     print("\n" + "=" * 72)
     if FAILURES:

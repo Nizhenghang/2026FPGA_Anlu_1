@@ -37,6 +37,13 @@ parameter BUF0_ADDR     = 24'd0;
 parameter BUF1_ADDR     = FRAME_PIXELS;
 parameter BUF2_ADDR     = 24'd614400;
 parameter BUF3_ADDR     = 24'd921600;
+// Power-up audio source. 0 = the built-in 48 kHz test tone owns the audio output
+// and the screen command "MUSC 1" switches to the TF-card WAV; 1 = play the WAV
+// straight from power-up, which is the behaviour that was verified on the board
+// before the serial screen existed. This is the only retreat path for the audio
+// source switch -- there is no DIP switch or key gesture for it, so flipping this
+// parameter and re-synthesising is how you get the old build back.
+parameter AUDIO_SRC_DEFAULT = 1'b0;
 
 wire Sdr_init_done;
 wire Sdr_init_ref_vld;
@@ -52,6 +59,7 @@ wire hs;
 wire vs;
 wire de;
 
+wire [23:0] vout_data_eff;
 wire [23:0] vout_data_raw;
 wire [23:0] vout_data_base;
 wire [23:0] vout_data_bright;
@@ -68,22 +76,24 @@ wire        video_frame_start;
 // Stage 4/5 transition controller outputs, all video_clk domain. bot/top are the
 // two buffer selectors frame_fifo_read turns into read base addresses; they are
 // equal except while a band effect is revealing the new picture. trans_effect is
-// the band code 1..6 that tells frame_fifo_read's select_top which sweep shape to
-// draw, and is 0 when idle or fading.
+// the band code 1..6 or 8..B that tells frame_fifo_read's select_top which sweep
+// shape to draw, and is 0 when idle or fading.
 wire [1:0]  trans_bot_idx;
 wire [1:0]  trans_top_idx;
-wire [2:0]  trans_effect;
+wire [3:0]  trans_effect;
 wire [1:0]  trans_img_idx;
 wire [3:0]  trans_fade_level;
 // Transition mode select. The physical path inverts the active-low DIP switches
 // (ON connects the pin to GND) to an intuitive ON=1 mode: 000 auto-cycle,
 // 001..110 force one band effect, 111 force fade. The serial screen can override
 // it through a mux at the assignment below; with no screen command the override
-// is off and trans_mode is exactly ~sw_v1 as before. sw[3] (SW4) is the banner
-// mask, handled separately. Assigned below, next to sw_v1's declaration:
+// is off and trans_mode is exactly ~sw_v1 zero-extended as before. sw[3] (SW4) is
+// the banner mask, handled separately. Codes 8..F are reachable only from the
+// serial screen -- the DIP path can never produce them, so the verified physical
+// behaviour is bit-for-bit unchanged. Assigned below, next to sw_v1's declaration:
 // initializing it here made TD warn HDL-5373 (used before declaration) and risked
 // binding a 1-bit implicit net.
-wire [2:0]  trans_mode;
+wire [3:0]  trans_mode;
 
 wire [3:0]  state_code;
 wire [6:0]  seg_data_0;
@@ -91,6 +101,11 @@ wire [6:0]  seg_data_0;
 // chain = {wav_found, audio_phase, streamer ever wrote, header magic rejected},
 // wr = peak audio FIFO occupancy on the sd_card_clk side, rd = peak occupancy on
 // the video_clk side. A non-zero wr with a zero rd pins the fault to the CDC.
+// chain == 8 (WAV found, streamer not armed) is the EXPECTED power-up reading
+// now that the test tone is the default audio source -- it means the screen has
+// not sent "MUSC 1" yet, not that anything is broken. bit1 is sticky across a
+// source switch, so once music has played it stays set even after "MUSC 0" puts
+// the tone back: it reports history, never "music is playing right now".
 wire [3:0]  dbg_audio_chain;
 wire [3:0]  dbg_aud_wr_peak;
 wire [3:0]  dbg_gate;
@@ -145,18 +160,24 @@ wire        cmd_auto_pulse;
 wire        cmd_bright_cycle_pulse;
 wire [2:0]  cmd_bright_set;
 wire        cmd_bright_set_v;
-wire [2:0]  cmd_mode;
+wire [3:0]  cmd_mode;
 wire        cmd_mode_set;
 wire        cmd_marquee;
 wire        cmd_marquee_set;
 wire [1:0]  cmd_img_sel;
 wire        cmd_img_sel_set;
+wire [3:0]  cmd_filt;
+wire        cmd_filt_set;
+wire        cmd_font;
+wire        cmd_font_set;
+wire        cmd_audio;
+wire        cmd_audio_set;
 
 // mode/marquee 覆盖：clk 域锁存屏幕设定值，物理拨码一旦变动即清除覆盖
 // （last-writer-wins 兜底，两端互为退路）。ovr_en=0 时下面的 trans_mode /
 // marquee_en 退回已验证的物理项 ~sw_v1 / sw4_v1，逐位不变——没接屏幕时就是
 // 改前的行为。
-reg  [2:0]  mode_ovr_val;
+reg  [3:0]  mode_ovr_val;
 reg         mode_ovr_en;
 reg         marq_ovr_val;
 reg         marq_ovr_en;
@@ -165,10 +186,38 @@ reg         marq_ovr_en;
 reg  [2:0]  sw_c0, sw_c1, sw_c2;
 reg         sw4_c0, sw4_c1, sw4_c2;
 // 覆盖状态再 2FF 同步进 video_clk，供 trans_mode / marquee_en 的 mux 使用
-reg  [2:0]  mode_ovr_val_v0, mode_ovr_val_v1;
+reg  [3:0]  mode_ovr_val_v0, mode_ovr_val_v1;
 reg         mode_ovr_en_v0, mode_ovr_en_v1;
 reg         marq_ovr_val_v0, marq_ovr_val_v1;
 reg         marq_ovr_en_v0, marq_ovr_en_v1;
+
+// FILT/FONT 是纯 UART 电平命令：SW1-3 已是转场、SW4 已是字幕屏蔽、key1/2/3 已
+// 占用，没有物理项可并联，所以这里刻意不写 ovr_en、不写拨码夺回逻辑。复位值
+// filt=0（直通）、font=0（平面），出复位即与加这两条命令之前逐位一致——退路
+// 就是"从不发命令"。
+reg  [3:0]  filt_val;
+reg         font_val;
+reg  [3:0]  filt_val_v0, filt_val_v1;
+reg         font_val_v0, font_val_v1;
+// filt 若在帧中途翻转，整幅画会出现"上半已处理、下半未处理"的横缝，所以这两个
+// 新信号在 video_frame_start 再打一拍、帧原子生效（与 video_transition 在转场
+// 起点采样 I_mode 是同一惯用法）。trans_mode / marquee_en 保持裸 2FF 不动。
+reg  [3:0]  filt_frame;
+reg         font_frame;
+
+// 音频源选择（MUSC 命令）。和 FILT/FONT 同一惯用法：clk 域锁存，复位到
+// AUDIO_SRC_DEFAULT，没有 ovr_en、没有拨码夺回——没有对应的物理开关，屏幕是唯一
+// 入口，退路就是那个参数。
+//
+// 为什么裸 2FF 就够、不需要 filt_frame 那种帧原子锁存：两个源都产出连续不断的
+// ~48 kHz audio_valid 流（测试音是 mclk 域 128 BCLK/帧 @ 6.144 MHz，播放器是
+// 25 MHz 上的小数累加器、FIFO 空时也发静音）。audio_arc_calculate 只数 48 个
+// valid 来配 CTS 节拍，所以切换最坏情况是一个采样点的相位不连续，ACR 参考永不
+// 断流。帧原子锁存反而会让 sd_card_clk 侧的 music_req 晚一整帧才撤，白白多读一个
+// 扇区。
+reg         music_en;
+reg         music_en_v0, music_en_v1;
+reg         music_en_s0, music_en_s1;
 
 // next/auto/img 命令脉冲 clk -> sd_card_clk 的 toggle-CDC：clk 域每来一条命令翻转
 // 一个 toggle，sd_card_clk 域 2FF 同步后用 s1^s2 还原成单周期脉冲。img 的 2-bit
@@ -184,8 +233,9 @@ wire        cmd_next_pulse_sd    = next_tgl_s1 ^ next_tgl_s2;
 wire        cmd_auto_pulse_sd    = auto_tgl_s1 ^ auto_tgl_s2;
 wire        cmd_img_sel_pulse_sd = img_tgl_s1  ^ img_tgl_s2;
 
-// 转场模式：屏幕覆盖优先，否则退回已验证的物理项 ~sw_v1（一位未动）
-assign trans_mode = mode_ovr_en_v1 ? mode_ovr_val_v1 : ~sw_v1;
+// 转场模式：屏幕覆盖优先，否则退回已验证的物理项 ~sw_v1（零扩展成 4 位，值域
+// 仍是 0..7，逐位不变；8..F 只能从串口到达）
+assign trans_mode = mode_ovr_en_v1 ? mode_ovr_val_v1 : {1'b0, ~sw_v1};
 
 // SW4 masks the scrolling slogan banner. Deliberately the inverse polarity of
 // SW1-3: those are mode selectors where ON=1 picks something, this one is a
@@ -209,12 +259,19 @@ wire hs_0;
 wire vs_0;
 wire de_0;
 
-// HDMI 1.4b 音频发射相关
+// HDMI 1.4b 音频发射相关。audio_valid / audio_left_data / audio_right_data 不再
+// 直接由某一个源驱动，而是下面 music_en_v1 选择的二选一 mux 的输出。
 wire        audio_pll_lock;
 wire        audio_mclk;
 wire        audio_i2s_bclk;
 wire        audio_i2s_lrck;
 wire        audio_i2s_dout;
+wire        tone_valid;
+wire [23:0] tone_left;
+wire [23:0] tone_right;
+wire        mus_valid;
+wire [23:0] mus_left;
+wire [23:0] mus_right;
 wire        audio_valid;
 wire [23:0] audio_left_data;
 wire [23:0] audio_right_data;
@@ -332,7 +389,13 @@ uart_screen_ctrl #(
     .cmd_marquee            (cmd_marquee),
     .cmd_marquee_set        (cmd_marquee_set),
     .cmd_img_sel            (cmd_img_sel),
-    .cmd_img_sel_set        (cmd_img_sel_set)
+    .cmd_img_sel_set        (cmd_img_sel_set),
+    .cmd_filt               (cmd_filt),
+    .cmd_filt_set           (cmd_filt_set),
+    .cmd_font               (cmd_font),
+    .cmd_font_set           (cmd_font_set),
+    .cmd_audio              (cmd_audio),
+    .cmd_audio_set          (cmd_audio_set)
 );
 
 // mode/marquee 覆盖锁存 + 物理拨码变动检测（clk 域）。屏幕命令置 ovr_en 并锁值；
@@ -342,7 +405,7 @@ always @(posedge clk or posedge rst_all) begin
     if (rst_all) begin
         sw_c0 <= 3'b111; sw_c1 <= 3'b111; sw_c2 <= 3'b111;
         sw4_c0 <= 1'b1;  sw4_c1 <= 1'b1;  sw4_c2 <= 1'b1;
-        mode_ovr_val <= 3'd0; mode_ovr_en <= 1'b0;
+        mode_ovr_val <= 4'd0; mode_ovr_en <= 1'b0;
         marq_ovr_val <= 1'b1; marq_ovr_en <= 1'b0;
     end else begin
         sw_c0 <= sw[2:0]; sw_c1 <= sw_c0; sw_c2 <= sw_c1;
@@ -361,6 +424,19 @@ always @(posedge clk or posedge rst_all) begin
         end else if (sw4_c1 != sw4_c2) begin
             marq_ovr_en  <= 1'b0;
         end
+    end
+end
+
+// FILT/FONT/MUSC 值锁存（clk 域）。独立成一个 block，上面的覆盖锁存一行未动。
+always @(posedge clk or posedge rst_all) begin
+    if (rst_all) begin
+        filt_val <= 4'd0;
+        font_val <= 1'b0;
+        music_en <= AUDIO_SRC_DEFAULT;
+    end else begin
+        if (cmd_filt_set)  filt_val <= cmd_filt;
+        if (cmd_font_set)  font_val <= cmd_font;
+        if (cmd_audio_set) music_en <= cmd_audio;
     end
 end
 
@@ -383,17 +459,21 @@ end
 // sd_card_clk 域：2FF 同步 toggle，s1^s2 还原单周期脉冲；img 选图值同样 2FF 同步。
 // 复位后 toggle 与同步链都为 0，不会冒出虚假脉冲；这些脉冲与 sd_card_bmp 内部
 // 消抖出的 key_next_press / key_auto_press OR 合并，实体按键仍是兜底。
+// music_en 是人类速率的准静态电平，走裸 2FF（不是 toggle），s1 直接接
+// sd_card_bmp.music_req——那个模块按约定把所有 CDC 留在 top。
 always @(posedge sd_card_clk or posedge rst_all) begin
     if (rst_all) begin
         next_tgl_s0 <= 1'b0; next_tgl_s1 <= 1'b0; next_tgl_s2 <= 1'b0;
         auto_tgl_s0 <= 1'b0; auto_tgl_s1 <= 1'b0; auto_tgl_s2 <= 1'b0;
         img_tgl_s0  <= 1'b0; img_tgl_s1  <= 1'b0; img_tgl_s2  <= 1'b0;
         img_sel_s0  <= 2'd0; img_sel_s1  <= 2'd0;
+        music_en_s0 <= AUDIO_SRC_DEFAULT; music_en_s1 <= AUDIO_SRC_DEFAULT;
     end else begin
         next_tgl_s0 <= next_tgl; next_tgl_s1 <= next_tgl_s0; next_tgl_s2 <= next_tgl_s1;
         auto_tgl_s0 <= auto_tgl; auto_tgl_s1 <= auto_tgl_s0; auto_tgl_s2 <= auto_tgl_s1;
         img_tgl_s0  <= img_tgl;  img_tgl_s1  <= img_tgl_s0;  img_tgl_s2  <= img_tgl_s1;
         img_sel_s0  <= img_sel_lat; img_sel_s1 <= img_sel_s0;
+        music_en_s0 <= music_en; music_en_s1 <= music_en_s0;
     end
 end
 
@@ -414,10 +494,14 @@ always @(posedge video_clk or posedge rst_all) begin
         sw_v1 <= 3'b111;
         sw4_v0 <= 1'b1;                     // PULLUP: SW4 OFF = 1 = banner shown out of reset
         sw4_v1 <= 1'b1;
-        mode_ovr_val_v0 <= 3'd0; mode_ovr_val_v1 <= 3'd0;
+        mode_ovr_val_v0 <= 4'd0; mode_ovr_val_v1 <= 4'd0;
         mode_ovr_en_v0  <= 1'b0; mode_ovr_en_v1  <= 1'b0;   // 覆盖默认关：trans_mode 退回 ~sw_v1
         marq_ovr_val_v0 <= 1'b1; marq_ovr_val_v1 <= 1'b1;
         marq_ovr_en_v0  <= 1'b0; marq_ovr_en_v1  <= 1'b0;   // 覆盖默认关：marquee_en 退回 sw4_v1
+        filt_val_v0 <= 4'd0; filt_val_v1 <= 4'd0;           // 0 = 直通
+        font_val_v0 <= 1'b0; font_val_v1 <= 1'b0;           // 0 = 平面字
+        filt_frame  <= 4'd0; font_frame  <= 1'b0;
+        music_en_v0 <= AUDIO_SRC_DEFAULT; music_en_v1 <= AUDIO_SRC_DEFAULT;
         vs_d <= 1'b0;
     end else begin
         disp_buf_idx_v0  <= disp_buf_idx;
@@ -438,6 +522,14 @@ always @(posedge video_clk or posedge rst_all) begin
         mode_ovr_en_v0  <= mode_ovr_en;  mode_ovr_en_v1  <= mode_ovr_en_v0;
         marq_ovr_val_v0 <= marq_ovr_val; marq_ovr_val_v1 <= marq_ovr_val_v0;
         marq_ovr_en_v0  <= marq_ovr_en;  marq_ovr_en_v1  <= marq_ovr_en_v0;
+        filt_val_v0 <= filt_val; filt_val_v1 <= filt_val_v0;   // clk -> video_clk 2FF
+        font_val_v0 <= font_val; font_val_v1 <= font_val_v0;
+        music_en_v0 <= music_en; music_en_v1 <= music_en_v0;   // 裸 2FF，刻意不进下面的帧原子锁存
+        // 帧原子生效：只在帧起点放行，避免算法/字体在帧中途切换撕出横缝
+        if (video_frame_start) begin
+            filt_frame <= filt_val_v1;
+            font_frame <= font_val_v1;
+        end
         vs_d <= vs;
     end
 end
@@ -457,6 +549,7 @@ sd_card_bmp #(
     .cmd_auto_pulse    (cmd_auto_pulse_sd),
     .cmd_img_sel       (img_sel_s1),
     .cmd_img_sel_pulse (cmd_img_sel_pulse_sd),
+    .music_req         (music_en_s1),
     .state_code        (state_code),
     .display_valid     (display_valid),
     .auto_play_enabled (auto_play_enabled),
@@ -546,11 +639,24 @@ video_timing_data video_timing_data_m0(
     .de                (de_0)
 );
 
+// 图像点运算（FILT n）刻意插在 video_delay 的输入端，而不是显示链里：
+// video_brightness -> video_fade -> audio_visualizer -> osd_overlay ->
+// rgb_to_axis 那条组合链已经是 video_clk 的关键路径（实测 27.3 ns / 20 级 /
+// 余量 12.3 ns），而 read_buf BRAM 输出 -> video_effect -> vout_data_r 这条
+// 路径余量接近满周期——video_delay 里现成的捕获寄存器（de_d[19] 门控的那一级）
+// 免费吸收算法的组合延迟。附带两个好处：不新增流水级，hs/vs/de 与像素的相对
+// 对齐一位不动；消隐期寄存器直接载 0，所以反色模式在消隐期不会刷白。
+video_effect u_video_effect (
+    .I_rgb (video_read_data[31:8]),
+    .I_sel (filt_frame),
+    .O_rgb (vout_data_eff)
+);
+
 video_delay video_delay_m0(
     .video_clk         (video_clk),
     .rst               (rst_all),
     .read_en           (video_read_en),
-    .read_data         (video_read_data[31:8]),
+    .read_data         (vout_data_eff),
     .hs                (hs_0),
     .vs                (vs_0),
     .de                (de_0),
@@ -632,6 +738,9 @@ osd_overlay #(
     .I_auto_play     (auto_play_v1),
     .I_brightness    (brightness_level_v1),
     .I_state_code    (state_code_v1),
+    .I_filt          (filt_frame),
+    .I_font          (font_frame),
+    .I_asrc          (music_en_v1),
     .O_rgb           (vout_data_osd)
 );
 
@@ -644,6 +753,7 @@ marquee_overlay #(
     .I_de  (de),
     .I_rgb (vout_data_osd),
     .I_en  (marquee_en),
+    .I_3d  (font_frame),
     .O_rgb (vout_data)
 );
 
@@ -715,18 +825,30 @@ sdram U3(
     .Sdr_rd_dout       (Sdr_rd_dout)
 );
 
-// ===================== 音频：TF 卡 WAV 流式播放 =====================
-// sd_audio_stream (inside sd_card_bmp, sd_card_clk domain) streams PCM frames
-// off the card into this async FIFO, which crosses them into video_clk. The
-// pacer below emits the continuous 48 kHz valid/sample stream the HDMI audio
-// core and audio_arc_calculate need -- including silence on underrun, so the
-// ACR reference never gaps.
+// ===================== 音频：测试音 / TF 卡 WAV 二选一 =====================
+// Two independent sources feed the HDMI audio core through one mux.
 //
-// The old synthetic-tone path (hdmi_audio_tone_i2s_64fs + I2S_receiver) is
-// removed from the build; both module files stay in the repo so the tone can be
-// re-hung for debugging. audio_mclk is still driven by PLL_HDMI_AUDIO (kept
-// because rst_all gates on audio_pll_lock -- the reset tree is unchanged) but
-// is now unused; audio_i2s_* are unused dangling wires.
+// Source 0 (music_en_v1 == 0, the AUDIO_SRC_DEFAULT power-up state) is the built-in
+// test tone: hdmi_audio_tone_i2s_64fs runs a DDS + ADSR in the audio_mclk domain
+// and drives a real I2S bus, which I2S_receiver samples back in video_clk. That
+// round trip through actual BCLK/LRCK is deliberate -- it exercises the same
+// interface a real codec would, and it is what audio_mclk and PLL_HDMI_AUDIO's
+// clk2_out exist for.
+//
+// Source 1 is the TF-card WAV: sd_audio_stream (inside sd_card_bmp, sd_card_clk
+// domain) streams PCM frames off the card into this async FIFO, which crosses
+// them into video_clk. audio_pcm_player emits the continuous 48 kHz valid/sample
+// stream -- including silence on underrun, so the ACR reference never gaps.
+//
+// Both sources therefore produce an unbroken valid stream at all times, which is
+// what makes the bare 2FF select on music_en safe: audio_arc_calculate only
+// counts 48 valids to pace CTS, so a switch costs at most one sample of phase
+// discontinuity and never gaps the ACR reference. No frame-atomic latch here.
+//
+// The tone generator is instantiated with its MODULE DEFAULT parameters. Do not
+// re-apply an AMP override: the default 24'sd8000000 is the value the envelope
+// was calibrated against (sustain sits ENV_SUSTAIN steps below the peak), and
+// tools/sim_tone_gen.py parses the module defaults.
 wfifo_32_32_512 u_audio_fifo (
     .rst        (rst_all),
     .clkw       (sd_card_clk),
@@ -744,6 +866,25 @@ wfifo_32_32_512 u_audio_fifo (
     .rdusedw    (aud_fifo_rdusedw)
 );
 
+hdmi_audio_tone_i2s_64fs u_tone (
+    .I_mclk     (audio_mclk),
+    .I_rst      (rst_all),
+    .O_i2s_BCLK (audio_i2s_bclk),
+    .O_i2s_LRCK (audio_i2s_lrck),
+    .O_i2s_DOUT (audio_i2s_dout)
+);
+
+I2S_receiver u_i2s_rx (
+    .I_clk              (video_clk),
+    .I_rst              (rst_all),
+    .I_i2s_BCLK         (audio_i2s_bclk),
+    .I_i2s_LRCK         (audio_i2s_lrck),
+    .I_i2s_DOUT         (audio_i2s_dout),
+    .O_audio_valid      (tone_valid),
+    .O_audio_left_data  (tone_left),
+    .O_audio_right_data (tone_right)
+);
+
 audio_pcm_player #(
     .CLK_FREQ_HZ    (25_000_000),
     .SAMPLE_RATE_HZ (48_000)
@@ -753,10 +894,14 @@ audio_pcm_player #(
     .fifo_re            (aud_fifo_re),
     .fifo_dout          (aud_fifo_dout),
     .fifo_rdusedw       (aud_fifo_rdusedw),
-    .O_audio_valid      (audio_valid),
-    .O_audio_left_data  (audio_left_data),
-    .O_audio_right_data (audio_right_data)
+    .O_audio_valid      (mus_valid),
+    .O_audio_left_data  (mus_left),
+    .O_audio_right_data (mus_right)
 );
+
+assign audio_valid      = music_en_v1 ? mus_valid : tone_valid;
+assign audio_left_data  = music_en_v1 ? mus_left  : tone_left;
+assign audio_right_data = music_en_v1 ? mus_right : tone_right;
 
 audio_arc_calculate #(
     .ACR_N         (6144)

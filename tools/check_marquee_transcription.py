@@ -10,18 +10,27 @@ the design that was intended, and that nothing around it drifted:
      the generator's own quality gates (ink, centring, clipping, duplicates).
   2. Every localparam, bit slice, register width and colour in
      marquee_overlay.v is re-derived from the generator's constants -- not
-     compared against numbers typed a second time in this file.
+     compared against numbers typed a second time in this file. That includes
+     the extruded emboss: both layers must stay a pure diagonal translation of
+     the face, their row gates must stay tall enough for a glyph that fills its
+     whole box without reaching the band's edge row, and their two colours must
+     darken away from the face while staying in its hue family.
   3. The instance in top_tf_hdmi_audio.v connects every port exactly once and
      sits at the very end of the video chain:
      osd_overlay.O_rgb -> vout_data_osd -> marquee_overlay -> vout_data ->
      video_rgb_to_axis_640x480.I_rgb.
+     I_3d is driven by font_frame, which crosses clk -> video_clk on a 2-FF
+     sync and is then re-latched on video_frame_start so FONT cannot change
+     style mid-frame and tear the picture; the same register feeds
+     osd_overlay's read-back, so the panel cannot disagree with the banner.
   4. SW4 polarity: marquee_en = sw4_v1 (OFF = banner shown), sw[3] on its own
-     2-FF chain, the SW1-3 path (sw_v0 <= sw[2:0], trans_mode = ~sw_v1)
-     untouched, and sw[3] still PULLUP in pin.adc so OFF really reads 1.
+     2-FF chain, the SW1-3 path (sw_v0 <= sw[2:0],
+     trans_mode = {1'b0, ~sw_v1}) untouched, and sw[3] still PULLUP in pin.adc
+     so OFF really reads 1.
   5. Build files: marquee_overlay.v registered in the .al; marquee_font.vh
      deliberately NOT registered and reached by a `include inside the module;
      and no declared identifier collides with a Verilog-2001 reserved word.
-  6. Nine in-memory mutations, each of which the checks above must catch.
+  6. Seventeen in-memory mutations, each of which the checks above must catch.
 
 The RTL parsing is imported from sim_marquee so the two tools cannot disagree
 about what the Verilog says.
@@ -169,7 +178,7 @@ def parse_rtl_text(text, tag="marquee_overlay.v"):
     code = sim.strip_comments(text)
     cfg = sim.parse_params(code, tag)
     widths = sim.parse_widths(code, tag)
-    ops = sim.parse_ops(code, cfg)
+    ops = sim.parse_ops(code, cfg, widths)
     return cfg, widths, ops
 
 
@@ -403,12 +412,63 @@ def check_geometry(src):
     check(not window_bad, "the row windows and I_en gating are as designed",
           "; ".join(window_bad))
 
+    # Emboss geometry. sim_marquee's Pass F measures where today's font actually
+    # puts thickness; these are the font-independent worst cases, re-derived from
+    # the generator, so they still hold if the slogan is redrawn to fill its box.
+    max_off = max(L["u_off"] for L in ops["ext_layers"])
+    gate_top = max(L["rows"][1] for L in ops["ext_layers"])
+    reach_y = derived["BAND_TEXT_Y_LAST"] + max_off
+    reach_col = derived["GUTTER"] + gen.CELL - 1 + max_off
+    emboss_bad = []
+    if reach_y >= derived["BAND_Y_LAST"]:
+        emboss_bad.append("a full-height glyph would push the extrusion to y=%d, "
+                          "onto the band's bottom edge row y=%d"
+                          % (reach_y, derived["BAND_Y_LAST"]))
+    if reach_col >= gen.PITCH:
+        emboss_bad.append("the rightmost extruded column is %d, at or past the "
+                          "%d px pitch, so thickness would bleed into the next "
+                          "cell" % (reach_col, gen.PITCH))
+    if gate_top < reach_y:
+        emboss_bad.append("the widest gate reaches y=%d but the extrusion can "
+                          "reach y=%d -- the bottom would be sheared off, so the "
+                          "gate is no longer derived from BAND_TEXT_Y_LAST"
+                          % (gate_top, reach_y))
+    check(not emboss_bad,
+          "the emboss stays inside its box: worst-case bottom y=%d under the edge "
+          "row y=%d, worst-case column %d inside the %d px pitch, gates reach y=%d"
+          % (reach_y, derived["BAND_Y_LAST"], reach_col, gen.PITCH, gate_top),
+          "; ".join(emboss_bad))
+
     packed_text = (gen.TEXT_RGB[0] << 16) | (gen.TEXT_RGB[1] << 8) | gen.TEXT_RGB[2]
     packed_edge = (gen.EDGE_RGB[0] << 16) | (gen.EDGE_RGB[1] << 8) | gen.EDGE_RGB[2]
     check(ops["text_rgb"] == packed_text and ops["edge_rgb"] == packed_edge,
           "the output mux uses 24'h%06X for text and 24'h%06X for the edges"
           % (packed_text, packed_edge),
           "RTL has 24'h%06X / 24'h%06X" % (ops["text_rgb"], ops["edge_rgb"]))
+
+    # The two emboss colours are new and the generator does not own them, so
+    # they are written down here once -- and then the invariants that make them
+    # right are checked, rather than the numbers being restated a second time.
+    check(ops["ext_rgb"] == (0xC0A050, 0x705820),
+          "the emboss uses 24'hC0A050 for the near step and 24'h705820 for the "
+          "far one", "RTL has 24'h%06X / 24'h%06X" % ops["ext_rgb"])
+    steps = [ops["text_rgb"]] + list(ops["ext_rgb"])
+    chans = [[(c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF] for c in steps]
+    lumas = [sum(c) for c in chans]
+    check(lumas[0] > lumas[1] > lumas[2],
+          "the three glyph colours get monotonically darker away from the face "
+          "(channel sums %s), which is what reads as depth" % lumas,
+          "not monotonic: %s" % lumas)
+    check(all(r > g > b for r, g, b in chans),
+          "face and both thickness steps stay in the same gold hue (r > g > b "
+          "in each of %s)" % ["24'h%06X" % c for c in steps],
+          "a step left the hue family: %s" % chans)
+    dim_white = 3 * (0xFF >> derived["DIM_SHIFT"])
+    check(lumas[2] > dim_white,
+          "even the far step (%d) outshines the brightest dimmed background "
+          "(white >> %d, %d), so the thickness never sinks into the band"
+          % (lumas[2], derived["DIM_SHIFT"], dim_white),
+          "far step %d <= %d" % (lumas[2], dim_white))
 
     fps = 25e6 / (sim.H_TOTAL * sim.V_TOTAL)
     check(cfg["SCROLL_FRAME_DIV"] >= 1,
@@ -432,11 +492,15 @@ def check_wiring(src):
 
     top = sim.strip_comments(src.top)
     ports = module_ports(src.rtl, "marquee_overlay")
-    check(sorted(ports) == ["I_clk", "I_de", "I_en", "I_rgb", "I_rst", "O_rgb"],
+    check(sorted(ports) == ["I_3d", "I_clk", "I_de", "I_en", "I_rgb", "I_rst",
+                            "O_rgb"],
           "marquee_overlay declares exactly %s" % sorted(ports),
           "got %s" % sorted(ports))
     check(ports.get("I_rgb") == ("input", 24) and ports.get("O_rgb") == ("output", 24),
           "I_rgb and O_rgb are 24 bits wide")
+    check(ports.get("I_3d") == ("input", 1),
+          "I_3d is a 1-bit input -- one wire chooses flat or extruded",
+          "got %s" % (ports.get("I_3d"),))
 
     params, name, body = find_instance(top, "marquee_overlay")
     if not check(name is not None, "top instantiates marquee_overlay"):
@@ -452,11 +516,12 @@ def check_wiring(src):
           % (sorted(set(ports) - set(conn)), sorted(set(conn) - set(ports))))
 
     wanted = {"I_clk": "video_clk", "I_rst": "rst_all", "I_de": "de",
-              "I_en": "marquee_en", "I_rgb": "vout_data_osd", "O_rgb": "vout_data"}
+              "I_en": "marquee_en", "I_rgb": "vout_data_osd", "O_rgb": "vout_data",
+              "I_3d": "font_frame"}
     bad = ["%s is driven by %s, expected %s" % (p, conn.get(p), s)
            for p, s in sorted(wanted.items()) if conn.get(p) != s]
-    check(not bad, "clock, reset, de, the SW4 mask and both pixel ports go where "
-                   "the plan says", "; ".join(bad))
+    check(not bad, "clock, reset, de, the SW4 mask, the emboss select and both "
+                   "pixel ports go where the plan says", "; ".join(bad))
 
     pconn, _ = connections(params)
     pbad = ["%s=%s, expected %s" % (k, pconn.get(k), v)
@@ -492,14 +557,60 @@ def check_wiring(src):
     check(re.search(r"wire\s+\[\s*23\s*:\s*0\s*\]\s+vout_data_osd\s*;", top),
           "vout_data_osd is declared as a 24-bit wire")
 
+    # Where I_3d comes from. FONT is decoded in the 50 MHz clk domain, so it has
+    # to cross into video_clk on a 2-FF level sync and then be re-latched on
+    # video_frame_start: a style change landing mid-frame would tear a horizontal
+    # seam across the picture. sim_uart_ctrl.py Pass D drives that whole chain;
+    # these checks pin the top's structure so the model cannot drift from it.
+    check(re.search(r"reg\s+font_frame\s*;", top) is not None,
+          "font_frame is its own 1-bit register in the video_clk domain")
+    check(re.search(r"font_val_v0\s*<=\s*font_val\s*;", top) is not None
+          and re.search(r"font_val_v1\s*<=\s*font_val_v0\s*;", top) is not None,
+          "font_val crosses clk -> video_clk on a 2-FF level synchroniser")
+    writes = sorted(w.strip() for w in re.findall(r"font_frame\s*<=\s*([^;]+);", top))
+    check(writes == ["1'b0", "font_val_v1"],
+          "font_frame is written exactly twice: out of reset to 1'b0 (flat, so "
+          "FONT 0 is also the power-up state) and from font_val_v1",
+          "got %s" % writes)
+    m = re.search(r"if\s*\(\s*video_frame_start\s*\)\s*begin(.*?)end", top, flags=re.S)
+    if check(m is not None, "the top has an `if (video_frame_start)` branch"):
+        branch = re.sub(r"\s+", " ", m.group(1))
+        check("font_frame <= font_val_v1;" in branch,
+              "the font_frame write sits inside that branch, so FONT takes "
+              "effect frame-atomically and cannot tear mid-picture")
+        check("filt_frame <= filt_val_v1;" in branch,
+              "filt_frame is latched in the same branch, so FILT is frame-atomic "
+              "too")
+
+    # One source of truth: the OSD read-back and the modules being controlled
+    # must all see the same register, or the panel would lie.
+    for module, port, net in (("osd_overlay", "I_font", "font_frame"),
+                              ("osd_overlay", "I_filt", "filt_frame"),
+                              ("video_effect", "I_sel", "filt_frame")):
+        _p, inst, ibody = find_instance(top, module)
+        iconn, _ = connections(ibody)
+        check(inst is not None and iconn.get(port) == net,
+              "%s.%s reads %s, the same register that drives the effect itself"
+              % (module, port, net),
+              "%s.%s is %s" % (module, port, iconn.get(port)))
+
 
 # ---------------------------------------------------------------------------
 # 4. SW4
 # ---------------------------------------------------------------------------
 SW4_FACTS = (
-    (r"assign\s+marquee_en\s*=\s*sw4_v1\s*;",
-     "marquee_en = sw4_v1, so SW4 OFF (pin high) shows the banner"),
-    (r"assign\s+marquee_en\s*=\s*~\s*sw4_v1\s*;", None),   # must NOT exist
+    (r"assign\s+marquee_en\s*=\s*marq_ovr_en_v1\s*\?\s*marq_ovr_val_v1\s*:\s*"
+     r"sw4_v1\s*;",
+     "marquee_en = the MARQ override, else sw4_v1, so SW4 OFF (pin high) shows "
+     "the banner whenever no override is in force"),
+    (r":\s*~\s*sw4_v1\s*;", None),   # must NOT exist
+    (r"marq_ovr_en_v0\s*<=\s*1'b0\s*;",
+     "marq_ovr_en_v0 comes out of reset disabled, so power-up obeys the DIP"),
+    (r"marq_ovr_en_v1\s*<=\s*1'b0\s*;",
+     "marq_ovr_en_v1 comes out of reset disabled"),
+    (r"marq_ovr_val_v0\s*<=\s*1'b1\s*;",
+     "marq_ovr_val resets to 1'b1 (banner shown), the same value sw4_v1 resets "
+     "to, so the mux cannot glitch the banner at power-up"),
     (r"sw4_v0\s*<=\s*sw\[3\]\s*;", "sw4_v0 samples sw[3]"),
     (r"sw4_v1\s*<=\s*sw4_v0\s*;", "sw4_v1 completes the 2-FF synchroniser"),
     (r"sw4_v0\s*<=\s*1'b1\s*;", "sw4_v0 comes out of reset high (banner shown)"),
@@ -510,9 +621,18 @@ SW4_FACTS = (
 )
 
 SW13_FACTS = (
+    (r"assign\s+trans_mode\s*=\s*mode_ovr_en_v1\s*\?\s*mode_ovr_val_v1\s*:\s*"
+     r"\{\s*1'b0\s*,\s*~\s*sw_v1\s*\}\s*;",
+     "trans_mode = the MODE override, else ~sw_v1 zero-extended to 4 bits -- "
+     "the verified physical term, still confined to 0..7 so codes 8..F can only "
+     "come from the serial screen"),
+    (r"wire\s+\[\s*3\s*:\s*0\s*\]\s*trans_mode\s*;",
+     "trans_mode is 4 bits wide, so MODE 8..F survives the trip to "
+     "video_transition"),
+    (r"mode_ovr_en_v0\s*<=\s*1'b0\s*;",
+     "the MODE override comes out of reset disabled, so power-up obeys SW1-3"),
     (r"sw_v0\s*<=\s*sw\[2:0\]\s*;", "SW1-3 still sample sw[2:0] only"),
     (r"sw_v1\s*<=\s*sw_v0\s*;", "the SW1-3 synchroniser is unchanged"),
-    (r"assign\s+trans_mode\s*=\s*~\s*sw_v1\s*;", "trans_mode = ~sw_v1 is unchanged"),
     (r"sw_v0\s*<=\s*3'b111\s*;", "sw_v0 still resets to 3'b111"),
     (r"sw_v1\s*<=\s*3'b111\s*;", "sw_v1 still resets to 3'b111"),
     (r"reg\s+\[\s*2\s*:\s*0\s*\]\s*sw_v0\s*;", "sw_v0 is still 3 bits wide"),
@@ -522,7 +642,8 @@ SW13_FACTS = (
 
 
 def check_sw4(src):
-    print("\n[4] SW4 polarity and the untouched SW1-3 path")
+    print("\n[4] SW4 polarity, the MARQ/MODE override muxes, and the untouched "
+          "SW1-3 path")
 
     top = sim.strip_comments(src.top)
     for pattern, label in SW4_FACTS:
@@ -655,13 +776,13 @@ def sub_once(text, pattern, repl, what):
 
 
 def check_controls(src):
-    print("\n[6] negative controls: nine mutations, each must be caught")
+    print("\n[6] negative controls: seventeen mutations, each must be caught")
 
     bites(check_sw4,
-          src.clone(top=sub_once(src.top, r"assign marquee_en = sw4_v1;",
-                                 "assign marquee_en = ~sw4_v1;",
-                                 "marquee_en assign")),
-          "C1 inverting marquee_en (banner hidden at power-up)")
+          src.clone(top=sub_once(src.top, r"marq_ovr_val_v1 : sw4_v1;",
+                                 "marq_ovr_val_v1 : ~sw4_v1;",
+                                 "marquee_en fallback")),
+          "C1 inverting marquee_en's SW4 fallback (banner hidden at power-up)")
 
     bites(check_sw4,
           src.clone(top=sub_once(src.top, r"sw_v0 <= sw\[2:0\];",
@@ -708,6 +829,68 @@ def check_controls(src):
           src.clone(rtl=sub_once(src.rtl, r"wire \[4:0\]  cell_idx;",
                                  "wire [4:0]  cell;", "cell_idx declaration")),
           "C9 declaring the glyph index as `cell`, a reserved word")
+
+    bites(check_geometry,
+          src.clone(rtl=sub_once(src.rtl, r"\(I_3d && ext1_on\)", "ext1_on",
+                                 "the I_3d gate on the ext1 arm")),
+          "C10 dropping I_3d from one emboss arm, so FONT 0 could not retreat")
+
+    bites(check_geometry,
+          src.clone(rtl=sub_once(src.rtl,
+                                 r"\(y_pos <= BAND_TEXT_Y_LAST_W \+ 10'd2\)",
+                                 "(y_pos <= BAND_TEXT_Y_LAST_W)",
+                                 "the in_e2_rows widening")),
+          "C11 leaving in_e2_rows at in_text_rows, shearing the emboss flat")
+
+    bites(check_geometry,
+          src.clone(rtl=sub_once(src.rtl,
+                                 r"\(y_pos <= BAND_TEXT_Y_LAST_W \+ 10'd2\)",
+                                 "(y_pos <= 10'd253)",
+                                 "the derived in_e2_rows top")),
+          "C12 hand-writing the gate top as 10'd253 instead of deriving it from "
+          "BAND_TEXT_Y_LAST")
+
+    bites(check_geometry,
+          src.clone(rtl=sub_once(src.rtl, r"assign u_e2 = u - 11'd2;",
+                                 "assign u_e2 = u - 11'd1;", "the u_e2 offset")),
+          "C13 offsetting both layers by 1 px, collapsing the two steps into one")
+
+    bites(check_wiring,
+          src.clone(top=sub_once(src.top, r"\.I_3d  \(font_frame\)",
+                                 ".I_3d  (1'b0)", "the I_3d connection")),
+          "C14 hard-wiring I_3d to 1'b0 in the top, so FONT could never reach "
+          "the marquee")
+
+    bites(check_wiring,
+          src.clone(top=sub_once(src.top, r"font_frame <= font_val_v1;",
+                                 "font_frame <= font_val_v0;",
+                                 "the font_frame source stage")),
+          "C15 taking font_frame from the first synchroniser stage, one FF short "
+          "of a safe clk -> video_clk crossing")
+
+    bites(check_wiring,
+          src.clone(top=sub_once(
+              src.top,
+              r"if \(video_frame_start\) begin\n"
+              r"            filt_frame <= filt_val_v1;\n"
+              r"            font_frame <= font_val_v1;\n"
+              r"        end",
+              "font_frame <= font_val_v1;\n"
+              "        if (video_frame_start) begin\n"
+              "            filt_frame <= filt_val_v1;\n"
+              "        end",
+              "the frame-atomic latch")),
+          "C16 latching font_frame outside `if (video_frame_start)`, so FONT "
+          "could change mid-frame and tear the picture")
+
+    bites(check_sw4,
+          src.clone(top=sub_once(src.top,
+                                 r"\{1'b0, ~sw_v1\};",
+                                 "~sw_v1;",
+                                 "trans_mode's zero-extended DIP fallback")),
+          "C17 dropping the {1'b0, ...} zero-extension from trans_mode's DIP "
+          "fallback, so a 3-bit term drives the 4-bit bus and MODE 8..F can no "
+          "longer be told apart from a truncated physical value")
 
 
 # ---------------------------------------------------------------------------

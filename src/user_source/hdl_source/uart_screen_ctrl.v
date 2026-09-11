@@ -13,12 +13,19 @@
 //   - A command is an ASCII frame: 4-char keyword + optional " <digit>",
 //     terminated by the TJC convention of three 0xFF bytes. Payload bytes are
 //     always ASCII (never 0xFF), so 0xFF unambiguously means terminator.
-//   - Commands: NEXT, AUTO, BRUP (no arg); BRGT n, MODE n, MARQ n, IMGX n.
+//   - Commands: NEXT, AUTO, BRUP (no arg); BRGT n, MODE n, MARQ n, IMGX n,
+//     FILT n, FONT n, MUSC n.
+//   - MODE and FILT arguments are ONE hex character, '0'-'9' then 'A'-'F' for
+//     10..15, so both code spaces reach 0..15 while every framed command stays
+//     exactly 9 bytes. Lowercase is rejected: the screen project has to send
+//     uppercase. A two-digit argument is not a wider code space, it is a 10
+//     byte frame that clen == 6 turns down.
 //
 // Every command effect is emitted in THIS clk domain:
 //   - one-clock pulses: cmd_next_pulse / cmd_auto_pulse / cmd_bright_cycle_pulse
 //   - value + one-clock set strobe: cmd_bright_set(+_v), cmd_mode(+_set),
-//     cmd_marquee(+_set), cmd_img_sel(+_set)
+//     cmd_marquee(+_set), cmd_img_sel(+_set), cmd_filt(+_set), cmd_font(+_set),
+//     cmd_audio(+_set)
 // The top level crosses the pulses into sd_card_clk (toggle-CDC) and the levels
 // into video_clk (2FF), and merges them with the physical keys/switches.
 //
@@ -46,12 +53,18 @@ module uart_screen_ctrl #(
     output reg        cmd_bright_cycle_pulse, // = key3 (brightness +1, wrap)
     output reg  [2:0] cmd_bright_set,         // BRGT n: absolute brightness 0..4
     output reg        cmd_bright_set_v,
-    output reg  [2:0] cmd_mode,               // MODE n: transition mode 0..7
+    output reg  [3:0] cmd_mode,               // MODE n: transition mode 0..15, hex digit
     output reg        cmd_mode_set,
     output reg        cmd_marquee,            // MARQ n: 1 show / 0 hide banner
     output reg        cmd_marquee_set,
     output reg  [1:0] cmd_img_sel,            // IMGX n: picture n-1, 0..3
-    output reg        cmd_img_sel_set
+    output reg        cmd_img_sel_set,
+    output reg  [3:0] cmd_filt,               // FILT n: image algorithm 0..15, hex digit
+    output reg        cmd_filt_set,
+    output reg        cmd_font,               // FONT n: 1 extruded emboss / 0 flat
+    output reg        cmd_font_set,
+    output reg        cmd_audio,              // MUSC n: 1 TF-card WAV / 0 built-in test tone
+    output reg        cmd_audio_set
 );
 
     // Stage 1 holds the line idle (high). Stage 2 drives it from a TX engine.
@@ -148,6 +161,17 @@ module uart_screen_ctrl #(
     reg [3:0] clen;
     reg [1:0] ffc;               // consecutive 0xFF count
 
+    // Single uppercase hex digit decode, shared by the MODE and FILT arguments.
+    // c5 is a flop that only ever loads on a payload byte, so both of these are
+    // stable for the whole dispatch cycle. 'a'-'f' sit deliberately outside the
+    // accepted range: one spelling per value keeps the screen project's button
+    // strings unambiguous and keeps the lowercase negative control in
+    // tools/sim_uart_ctrl.py meaningful.
+    wire       c5_is_hex = ((c5 >= "0") && (c5 <= "9")) ||
+                           ((c5 >= "A") && (c5 <= "F"));
+    wire [3:0] c5_hex    = (c5 <= "9") ? (c5 - 8'h30)
+                                       : ((c5 - 8'h41) + 4'd10);
+
     always @(posedge clk or posedge rst) begin
         if (rst) begin
             c0 <= 8'd0; c1 <= 8'd0; c2 <= 8'd0;
@@ -159,12 +183,18 @@ module uart_screen_ctrl #(
             cmd_bright_cycle_pulse <= 1'b0;
             cmd_bright_set         <= 3'd0;
             cmd_bright_set_v       <= 1'b0;
-            cmd_mode               <= 3'd0;
+            cmd_mode               <= 4'd0;
             cmd_mode_set           <= 1'b0;
             cmd_marquee            <= 1'b0;
             cmd_marquee_set        <= 1'b0;
             cmd_img_sel            <= 2'd0;
             cmd_img_sel_set        <= 1'b0;
+            cmd_filt               <= 4'd0;
+            cmd_filt_set           <= 1'b0;
+            cmd_font               <= 1'b0;
+            cmd_font_set           <= 1'b0;
+            cmd_audio              <= 1'b0;
+            cmd_audio_set          <= 1'b0;
         end else begin
             // default: every strobe/pulse is high for one clock only
             cmd_next_pulse         <= 1'b0;
@@ -174,11 +204,21 @@ module uart_screen_ctrl #(
             cmd_mode_set           <= 1'b0;
             cmd_marquee_set        <= 1'b0;
             cmd_img_sel_set        <= 1'b0;
+            cmd_filt_set           <= 1'b0;
+            cmd_font_set           <= 1'b0;
+            cmd_audio_set          <= 1'b0;
 
             if (rx_valid) begin
                 if (rx_byte == 8'hFF) begin
                     if (ffc == 2'd2) begin
                         // ---- third 0xFF: frame complete, dispatch ----
+                        // MODE and FILT take the whole hex range, not just the
+                        // codes that mean something today. The reserved ones
+                        // fall through to a defined harmless behaviour in the
+                        // consumer (MODE F is fade, FILT D/E/F are passthrough),
+                        // so a mistyped button lands somewhere safe instead of
+                        // being dropped with no feedback on a screen that never
+                        // reads back.
                         ffc  <= 2'd0;
                         clen <= 4'd0;
                         case ({c0, c1, c2, c3})
@@ -189,8 +229,8 @@ module uart_screen_ctrl #(
                                     cmd_bright_set   <= c5 - 8'h30;
                                     cmd_bright_set_v <= 1'b1;
                                  end
-                        "MODE": if (clen == 4'd6 && c4 == " " && c5 >= "0" && c5 <= "7") begin
-                                    cmd_mode     <= c5 - 8'h30;
+                        "MODE": if (clen == 4'd6 && c4 == " " && c5_is_hex) begin
+                                    cmd_mode     <= c5_hex;
                                     cmd_mode_set <= 1'b1;
                                  end
                         "MARQ": if (clen == 4'd6 && c4 == " " && (c5 == "0" || c5 == "1")) begin
@@ -200,6 +240,18 @@ module uart_screen_ctrl #(
                         "IMGX": if (clen == 4'd6 && c4 == " " && c5 >= "1" && c5 <= "4") begin
                                     cmd_img_sel     <= (c5 - 8'h30) - 2'd1;
                                     cmd_img_sel_set <= 1'b1;
+                                 end
+                        "FILT": if (clen == 4'd6 && c4 == " " && c5_is_hex) begin
+                                    cmd_filt     <= c5_hex;
+                                    cmd_filt_set <= 1'b1;
+                                 end
+                        "FONT": if (clen == 4'd6 && c4 == " " && (c5 == "0" || c5 == "1")) begin
+                                    cmd_font     <= (c5 == "1");
+                                    cmd_font_set <= 1'b1;
+                                 end
+                        "MUSC": if (clen == 4'd6 && c4 == " " && (c5 == "0" || c5 == "1")) begin
+                                    cmd_audio     <= (c5 == "1");
+                                    cmd_audio_set <= 1'b1;
                                  end
                         default: ;
                         endcase

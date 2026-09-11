@@ -10,6 +10,10 @@
 // on an 11 bit wire; the single unsigned compare u < TEXT_W covers both the
 // "text has not entered yet" and "text has fully left" cases because the
 // borrow wraps the negative side above TEXT_W.
+//
+// I_3d selects the rendering style: 0 is flat and bit-identical to the design
+// before this port existed, 1 adds a two-step extruded emboss down-right of
+// the glyph face.
 module marquee_overlay #(
     parameter H_ACTIVE = 640,
     parameter V_ACTIVE = 480
@@ -19,6 +23,7 @@ module marquee_overlay #(
     input  wire        I_de,
     input  wire [23:0] I_rgb,
     input  wire        I_en,
+    input  wire        I_3d,
     output wire [23:0] O_rgb
 );
 
@@ -72,6 +77,26 @@ wire [4:0]  gcol;
 wire [4:0]  row;
 wire [23:0] glyph_bits;
 wire        text_on;
+wire        in_e1_rows;
+wire        in_e2_rows;
+wire [10:0] u_e1;
+wire [10:0] u_e2;
+wire        in_region_e1;
+wire        in_region_e2;
+wire [4:0]  cell_idx_e1;
+wire [4:0]  cell_idx_e2;
+wire [4:0]  col_e1;
+wire [4:0]  col_e2;
+wire        col_in_glyph_e1;
+wire        col_in_glyph_e2;
+wire [4:0]  gcol_e1;
+wire [4:0]  gcol_e2;
+wire [4:0]  row_e1;
+wire [4:0]  row_e2;
+wire [23:0] glyph_e1;
+wire [23:0] glyph_e2;
+wire        ext1_on;
+wire        ext2_on;
 wire [7:0]  dim_r;
 wire [7:0]  dim_g;
 wire [7:0]  dim_b;
@@ -95,14 +120,54 @@ assign glyph_bits = marquee_glyph(cell_idx[3:0], row);
 assign text_on = in_text_rows && in_region && col_in_glyph &&
                  glyph_bits[5'd23 - gcol];
 
+// Extruded emboss: two progressively darker thickness layers grown down-right
+// from the face. The row gates must be wider than in_text_rows -- today's
+// glyphs stop at box row 22, so the extrusion bottoms out at y 252, one row
+// below the last face row, and clipping it there would shear the 3D flat. The
+// e2 gate carries that row; its extra y 253 and e1's extra y 252 are headroom
+// for a descender on box row 23, and both are kept so a font change cannot make
+// the two layers clip at different heights. tools/sim_marquee.py Pass F measures
+// all of this from the font rather than assuming it.
+// Offsets reuse the same 11 bit borrow-wrap as the face, so u_eN < TEXT_W is
+// false exactly where the shifted sample falls outside the strip, and a
+// wrapped row_eN lands in marquee_glyph's default arm (= no ink above).
+assign in_e1_rows = (y_pos >= BAND_TEXT_Y_W) &&
+                    (y_pos <= BAND_TEXT_Y_LAST_W + 10'd1);
+assign in_e2_rows = (y_pos >= BAND_TEXT_Y_W) &&
+                    (y_pos <= BAND_TEXT_Y_LAST_W + 10'd2);
+
+assign u_e1 = u - 11'd1;
+assign in_region_e1   = (u_e1 < TEXT_W_P);
+assign cell_idx_e1    = u_e1[9:5];
+assign col_e1         = u_e1[4:0];
+assign col_in_glyph_e1 = (col_e1 >= GUTTER_W) && (col_e1 <= GUTTER_LAST_W);
+assign gcol_e1        = col_e1 - GUTTER_W;
+assign row_e1         = y_pos[4:0] - ROW_LSB_W - 5'd1;
+assign glyph_e1       = marquee_glyph(cell_idx_e1[3:0], row_e1);
+assign ext1_on = in_e1_rows && in_region_e1 && col_in_glyph_e1 &&
+                 glyph_e1[5'd23 - gcol_e1];
+
+assign u_e2 = u - 11'd2;
+assign in_region_e2   = (u_e2 < TEXT_W_P);
+assign cell_idx_e2    = u_e2[9:5];
+assign col_e2         = u_e2[4:0];
+assign col_in_glyph_e2 = (col_e2 >= GUTTER_W) && (col_e2 <= GUTTER_LAST_W);
+assign gcol_e2        = col_e2 - GUTTER_W;
+assign row_e2         = y_pos[4:0] - ROW_LSB_W - 5'd2;
+assign glyph_e2       = marquee_glyph(cell_idx_e2[3:0], row_e2);
+assign ext2_on = in_e2_rows && in_region_e2 && col_in_glyph_e2 &&
+                 glyph_e2[5'd23 - gcol_e2];
+
 assign dim_r = I_rgb[23:16] >> DIM_SHIFT;
 assign dim_g = I_rgb[15:8]  >> DIM_SHIFT;
 assign dim_b = I_rgb[7:0]   >> DIM_SHIFT;
 
-assign O_rgb = !in_band     ? I_rgb :
-               text_on      ? 24'hFFE878 :
-               band_edge    ? 24'h60D8FF :
-                              {dim_r, dim_g, dim_b};
+assign O_rgb = !in_band          ? I_rgb :
+               text_on           ? 24'hFFE878 :
+               (I_3d && ext1_on) ? 24'hC0A050 :
+               (I_3d && ext2_on) ? 24'h705820 :
+               band_edge         ? 24'h60D8FF :
+                                   {dim_r, dim_g, dim_b};
 
 always @(posedge I_clk or posedge I_rst) begin
     if (I_rst) begin

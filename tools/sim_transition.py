@@ -8,9 +8,13 @@ this script models both and, more importantly, models the coupling between
 them, which is where a mistake would actually hide.
 
   video_transition.v   video_clk, one decision per frame. Chooses the two
-                       buffer selectors, the 3-bit effect code and the fade
-                       level. I_mode 000 auto-cycles the six band effects plus
-                       fade, 001..110 force one effect, 111 forces fade.
+                       buffer selectors, the 4-bit effect code and the fade
+                       level. I_mode 0 auto-cycles the ten band effects plus
+                       fade, 1..6 and 8..11 force that band effect, 7 forces
+                       fade, 12/13/14 are the three non-band effects (instant
+                       cut, slow fade, black hold) and 15 is reserved as fade.
+                       Only 0..7 are reachable from the DIP switches; the rest
+                       come from the serial screen.
   frame_fifo_read.v    ext_mem_clk, one burst at a time. Turns the two
                        selectors plus the effect code into read base addresses.
                        During a band effect it consults
@@ -18,7 +22,8 @@ them, which is where a mistake would actually hide.
                        group boundary and redirects the address by +/- the
                        buffer delta whenever the selection flips, so a whole
                        family of vertical sweeps (wipe down/up, blinds, split,
-                       random bars, comb) shares the one proven redirect
+                       random bars, comb, pincer, interlace, coarse blocks,
+                       quad interleave) shares the one proven redirect
                        mechanism. effect=1 reproduces the original single
                        crossing wipe bit for bit.
 
@@ -36,13 +41,22 @@ Passes
      verifying what the panel would actually show. Forced to wipe-down so it
      stays the hardware-verified single-boundary regression.
   E  parameter consistency, read back out of the RTL sources so the check
-     cannot drift away from what is actually instantiated.
-  F  DIP I_mode (3 bit) selects which effect the controller commits to: the
-     auto-cycle rotation, one of the six forced band effects, or fade.
-  G  band effect geometry: every effect across the whole ramp, checking the
-     select_top pattern, full coverage at saturation, word-by-word buffer
+     cannot drift away from what is actually instantiated, including the fade
+     budgets of all three fade-shaped effects.
+  F  I_mode (4 bit) selects which effect the controller commits to: the
+     auto-cycle rotation over all sixteen codes, each forced band effect, each
+     forced non-band effect, and the reserved code falling through to fade.
+     Asserts the rotation never surfaces 12/13/14.
+  G  band effect geometry: all ten band effects across the whole ramp, checking
+     the select_top pattern, full coverage at saturation, word-by-word buffer
      attribution through the FSM, and that redirects only ever fire on a group
-     boundary. Carries a negative control on the saturation guard.
+     boundary. Carries a negative control on the saturation guard that effects
+     3/4/5 need, and a separate one proving effects 8..11 do NOT need it.
+  H  the three non-band effects traced frame by frame: how many frames each
+     takes, on which frame the picture index changes, what the brightness does
+     in between, how long ST_BLACK dwells, and that the band engine stays
+     inert throughout. Negative controls on the flag-written-but-never-read
+     bug class.
 
 Exit code is 0 only if every gated check passed.
 """
@@ -95,8 +109,9 @@ class FrameFifoRead(object):
         self.wipe = wipe
         self.WIPE_GRP_MAX = wipe_grp_max
         self.WIPE_GRP_STEP = wipe_grp_step
-        # band geometry code, 1..6; 0 and 7 mean "no band redirect" and are
-        # never passed to select_top. effect=1 is the legacy wipe down.
+        # band geometry code, 1..6 and 8..11; 0, 7 and 12..15 mean "no band
+        # redirect" and are never passed to select_top. effect=1 is the legacy
+        # wipe down.
         self.effect = effect
         # word offset within the frame at which the address was redirected,
         # recorded for reporting; -1 means no redirect happened this frame
@@ -109,8 +124,19 @@ class FrameFifoRead(object):
     # code. Mirrors the select_top() Verilog function exactly, including the
     # progress >= grp_max saturation guard that reveals the last row of blinds
     # and the outermost group of split. Effects 1 and 2 scale with grp_max so
-    # they also run at the reduced coupled geometry; effects 3..6 hardcode the
+    # they also run at the reduced coupled geometry; effects 3..11 hardcode the
     # real 240 group panel constants (16 group slats, centre 120, bitrev8).
+    #
+    # The four effects added later (8..11) deliberately carry NO saturation
+    # guard, and that is provable rather than hopeful: each maps g through a
+    # pure wiring permutation (bit reverse / rotate, zero logic) and compares
+    # against a threshold that already exceeds every key the permutation can
+    # produce once progress == grp_max. Eff 8 splits grp_max in half so
+    # gi<120 || gi>=120 covers all 240. Eff 9 and 11 scale the threshold to
+    # 270 while their widest keys are 247 and 251. Eff 10 compares a 4 bit
+    # reverse against progress>>4 == 15 while gi[7:4] <= 14. Pass G asserts
+    # both halves of that claim: full reveal at grp_max AND unrevealed groups
+    # still present one step earlier, so a threshold written too loose fails.
     @staticmethod
     def select_top(g, progress, eff, grp_max=240):
         if eff == 1:                                  # wipe down
@@ -132,6 +158,18 @@ class FrameFifoRead(object):
             if g & 1:
                 return 1 if g >= (grp_max - progress) else 0
             return 1 if g < progress else 0
+        if eff == 8:                                  # pincer from both edges
+            half = progress >> 1
+            return 1 if (g < half or g >= (grp_max - half)) else 0
+        if eff == 9:                                  # interlace, even then odd
+            scaled = progress + (progress >> 3)
+            return 1 if ((((g & 1) << 7) | (g >> 1)) < scaled) else 0
+        if eff == 10:                                 # coarse blocks of 16
+            rank = int(format((g >> 4) & 0xF, '04b')[::-1], 2)
+            return 1 if (rank < (progress >> 4)) else 0
+        if eff == 11:                                 # four-way interleave
+            scaled = progress + (progress >> 3)
+            return 1 if ((((g & 3) << 6) | (g >> 2)) < scaled) else 0
         return 0
 
     def reset(self):
@@ -447,34 +485,62 @@ class FrameFifoRead(object):
 # video_transition, clock accurate but only ever ticked on interesting edges
 # ---------------------------------------------------------------------------
 
-ST_IDLE, ST_FADE_OUT, ST_FADE_IN, ST_BAND, ST_WIPE_END = range(5)
-ST_NAMES = ['IDLE', 'FADE_OUT', 'FADE_IN', 'BAND', 'WIPE_END']
+ST_IDLE, ST_FADE_OUT, ST_FADE_IN, ST_BAND, ST_WIPE_END, ST_BLACK = range(6)
+ST_NAMES = ['IDLE', 'FADE_OUT', 'FADE_IN', 'BAND', 'WIPE_END', 'BLACK']
 
-# effect codes shared with frame_fifo_read.select_top. 0 and 7 are both "fade"
-# (no band redirect); 1..6 are the horizontal band geometries.
+# Effect codes, now 4 bits, shared with frame_fifo_read.select_top. 0 and 7 are
+# both "fade" (no band redirect); 1..6 and 8..11 are the horizontal band
+# geometries; 12..14 are non-band effects that never reach the band engine at
+# all; 15 is reserved and behaves as fade.
 EFF_NAMES = {0: 'fade', 1: 'wipe-down', 2: 'wipe-up', 3: 'blinds',
-             4: 'split', 5: 'random-bars', 6: 'comb', 7: 'fade'}
+             4: 'split', 5: 'random-bars', 6: 'comb', 7: 'fade',
+             8: 'pincer', 9: 'interlace', 10: 'coarse-blocks',
+             11: 'quad-interleave', 12: 'instant-cut', 13: 'slow-fade',
+             14: 'black-hold', 15: 'fade'}
+
+# The band codes, i.e. everything that drives the two selectors apart and asks
+# frame_fifo_read to ramp a boundary. Mirrors the use_band wire's explicit pair
+# of ranges -- NOT "everything but 0, 7 and 12..15", because the RTL is written
+# as two ranges and 15 must not sneak in.
+BAND_EFFECTS = tuple(list(range(1, 7)) + list(range(8, 12)))
+
+# The auto-cycle rotation. 12/13/14 are excluded on purpose: a judge watching
+# the default carousel should never see a hard cut or a two-second blackout.
+AUTO_CHAIN = [7, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11]
 
 
 class VideoTransition(object):
     """video_transition.v. tick() is one video_clk cycle.
 
-    I_mode is now 3 bits: 000 auto-cycle (rotate effect_cnt through the six
-    band effects plus fade, one per picture change), 001..110 force one band
-    effect, 111 forces fade. The effect for a transition is sampled once, at
-    the ST_IDLE/pending branch, so a mid-flight DIP change cannot tear it.
+    I_mode is 4 bits: 0 auto-cycles the band effects plus fade (12/13/14 are
+    excluded from the rotation on purpose), 1..6 and 8..11 force that band
+    effect, 7 forces fade, 12 is an instant cut, 13 halves the fade rate, 14
+    inserts a black hold between the fade out and the index change, 15 is
+    reserved and behaves as fade. Only 0..7 are reachable from the DIP switches
+    -- the physical path is {1'b0, ~sw[2:0]} -- so 8..F arrive from the serial
+    screen alone. The effect for a transition is sampled once, at the
+    ST_IDLE/pending branch, so a mid-flight mode change cannot tear it.
     """
 
-    def __init__(self, fade_max=8, wipe_hold=40, wipe_settle=2):
+    def __init__(self, fade_max=8, wipe_hold=40, wipe_settle=2, black_hold=12):
         self.FADE_MAX = fade_max
         self.WIPE_HOLD = wipe_hold
         self.WIPE_SETTLE = wipe_settle
+        self.BLACK_HOLD = black_hold
         self.state = ST_IDLE
         self.cur_idx = 0
         self.tgt_idx = 0
         self.hold_cnt = 0
         self.effect_cnt = 7        # auto-cycle counter; 7 makes the first a fade
         self.dv_d = 0
+        # Reshape the fade without touching FADE_MAX. video_fade's scale_channel
+        # is 4 bits with 8 as unity gain, so levels 9..16 fall into its default
+        # arm and stop attenuating: a longer fade has to come from a prescaler,
+        # not a bigger ramp. Both are cleared at the start of every transition
+        # and ignored by the band path, so with neither set the fade is bit for
+        # bit the original one.
+        self.fade_slow = 0         # 1 = halve the rate via hold_cnt[0]
+        self.fade_hold = 0         # 1 = insert ST_BLACK before the index change
         self.bot_idx = 0
         self.top_idx = 0
         self.img_idx = 0
@@ -487,8 +553,14 @@ class VideoTransition(object):
         self.dv_d = display_valid          # dv_d <= I_display_valid, unconditional
 
         if not display_valid:
+            # Nothing committed, or the card was pulled: hold black and abandon
+            # any half finished transition. Equalising the selectors here also
+            # stops a running band effect, and both fade flags are dropped so
+            # the next commit starts from the plain fade.
             self.state = ST_IDLE
             self.hold_cnt = 0
+            self.fade_slow = 0
+            self.fade_hold = 0
             self.fade_level = 0
             self.top_idx = self.bot_idx
             self.o_effect = 0
@@ -499,8 +571,10 @@ class VideoTransition(object):
             self.top_idx = disp_idx
             self.img_idx = disp_idx
             self.fade_level = 0
-            self.hold_cnt = 0
             self.o_effect = 0
+            self.hold_cnt = 0
+            self.fade_slow = 0
+            self.fade_hold = 0
             self.state = ST_FADE_IN
         elif frame_start:
             s = self.state
@@ -508,43 +582,106 @@ class VideoTransition(object):
                 if pending:
                     self.tgt_idx = disp_idx
                     self.hold_cnt = 0
-                    # chosen_effect mirrors the RTL wire: auto (000) rotates the
-                    # free running counter, 111 forces fade, 001..110 force that
-                    # band effect. It reads the OLD effect_cnt, matching non
+                    # Cleared first so the dispatch below wins by last
+                    # assignment, exactly as the RTL relies on.
+                    self.fade_slow = 0
+                    self.fade_hold = 0
+                    # chosen_effect mirrors the RTL wire: auto (0) rotates the
+                    # free running counter, 7 forces fade, every other code
+                    # forces itself. It reads the OLD effect_cnt, matching non
                     # blocking semantics, then the counter advances.
-                    if mode == 0b000:
+                    if mode == 0:
                         chosen = self.effect_cnt
-                    elif mode == 0b111:
+                    elif mode == 7:
                         chosen = 7
                     else:
                         chosen = mode
-                    use_band = 1 if (chosen != 0 and chosen != 7) else 0
+                    use_band = 1 if chosen in BAND_EFFECTS else 0
                     if use_band:
                         self.o_effect = chosen
                         self.top_idx = disp_idx
                         self.state = ST_BAND
                     else:
                         self.o_effect = 0
-                        self.state = ST_FADE_OUT
-                    # auto-cycle counter keeps running in every mode, 1..7
-                    self.effect_cnt = 1 if self.effect_cnt >= 7 \
-                        else self.effect_cnt + 1
+                        if chosen == 12:
+                            # Instant cut: every index moves on this same
+                            # I_frame_start, the selectors are left equal and
+                            # O_effect stays 0, so the next frame read sees
+                            # wipe_sel_diff == 0 and base_bot is already the new
+                            # picture. fade_level is deliberately untouched --
+                            # in ST_IDLE it is necessarily FADE_MAX.
+                            self.cur_idx = disp_idx
+                            self.bot_idx = disp_idx
+                            self.top_idx = disp_idx
+                            self.img_idx = disp_idx
+                            self.state = ST_WIPE_END
+                        elif chosen == 13:
+                            self.fade_slow = 1
+                            self.state = ST_FADE_OUT
+                        elif chosen == 14:
+                            self.fade_hold = 1
+                            self.state = ST_FADE_OUT
+                        else:
+                            self.state = ST_FADE_OUT    # 7 fade, and reserved 15
+                    # The counter keeps running in every mode; forced modes
+                    # ignore it, so advancing is harmless and switching back to
+                    # auto resumes the rotation. 7->1..6->8..11->7.
+                    if self.effect_cnt == 7:
+                        self.effect_cnt = 1
+                    elif self.effect_cnt == 6:
+                        self.effect_cnt = 8
+                    elif self.effect_cnt == 11:
+                        self.effect_cnt = 7
+                    else:
+                        self.effect_cnt = (self.effect_cnt + 1) & 0xF
             elif s == ST_FADE_OUT:
+                # hold_cnt doubles as the fade_slow prescaler. The RTL tests
+                # hold_cnt[0] against its OLD value while simultaneously
+                # assigning hold_cnt <= hold_cnt + 1, so the local snapshot has
+                # to be taken before the increment: with fade_slow set the level
+                # moves on every other frame. With fade_slow clear the condition
+                # is unconditionally true and the sequence is the original one.
+                hc_old = self.hold_cnt
+                self.hold_cnt = (hc_old + 1) & 0x3F
                 if self.fade_level <= 1:
                     self.fade_level = 0
+                    if self.fade_hold:
+                        # Effect 14: stay black for BLACK_HOLD frames before
+                        # handing the panel over, so the swap happens while the
+                        # screen is genuinely dark rather than merely dim.
+                        self.hold_cnt = 0
+                        self.state = ST_BLACK
+                    else:
+                        self.cur_idx = self.tgt_idx
+                        self.bot_idx = self.tgt_idx
+                        self.top_idx = self.tgt_idx
+                        self.img_idx = self.tgt_idx
+                        self.hold_cnt = 0
+                        self.state = ST_FADE_IN
+                elif (not self.fade_slow) or (hc_old & 1):
+                    self.fade_level -= 1
+            elif s == ST_FADE_IN:
+                hc_old = self.hold_cnt
+                self.hold_cnt = (hc_old + 1) & 0x3F
+                if self.fade_level >= self.FADE_MAX:
+                    self.fade_level = self.FADE_MAX
+                    self.hold_cnt = 0
+                    self.state = ST_IDLE
+                elif (not self.fade_slow) or (hc_old & 1):
+                    self.fade_level += 1
+            elif s == ST_BLACK:
+                # Only reachable from effect 14. The level is already 0 and the
+                # selectors are still equal and still on the outgoing picture,
+                # so the panel shows true black for the whole of this state.
+                if self.hold_cnt >= self.BLACK_HOLD - 1:
                     self.cur_idx = self.tgt_idx
                     self.bot_idx = self.tgt_idx
                     self.top_idx = self.tgt_idx
                     self.img_idx = self.tgt_idx
+                    self.hold_cnt = 0
                     self.state = ST_FADE_IN
                 else:
-                    self.fade_level -= 1
-            elif s == ST_FADE_IN:
-                if self.fade_level >= self.FADE_MAX:
-                    self.fade_level = self.FADE_MAX
-                    self.state = ST_IDLE
-                else:
-                    self.fade_level += 1
+                    self.hold_cnt = (self.hold_cnt + 1) & 0x3F
             elif s == ST_BAND:
                 if self.hold_cnt >= self.WIPE_HOLD - 1:
                     self.cur_idx = self.tgt_idx
@@ -1180,6 +1317,7 @@ def pass_e():
     top_src = read_text('top_tf_hdmi_audio.v')
     frw_src = read_text('SD', 'frame_read_write.v')
     ffr_src = read_text('SD', 'frame_fifo_read.v')
+    vt_src = read_text('video_transition.v')
 
     hold = find_param(top_src, 'WIPE_HOLD')
     settle = find_param(top_src, 'WIPE_SETTLE')
@@ -1188,11 +1326,16 @@ def pass_e():
     gstep = find_param(frw_src, 'WIPE_GRP_STEP')
     fmax2 = find_param(ffr_src, 'WIPE_GRP_MAX')
     fstep2 = find_param(ffr_src, 'WIPE_GRP_STEP')
+    # The top does not override BLACK_HOLD, so the module default is what ships.
+    # find_param falls through from a `.NAME(...)` override to the `parameter`
+    # declaration, which is exactly the precedence the elaborator uses.
+    black_hold = find_param(top_src, 'BLACK_HOLD',
+                            default=find_param(vt_src, 'BLACK_HOLD'))
 
-    if None in (hold, settle, fade_max, gmax, gstep):
+    if None in (hold, settle, fade_max, gmax, gstep, black_hold):
         fail("could not parse the wipe parameters out of the RTL: hold=%s "
-             "settle=%s fade=%s gmax=%s gstep=%s"
-             % (hold, settle, fade_max, gmax, gstep))
+             "settle=%s fade=%s gmax=%s gstep=%s black=%s"
+             % (hold, settle, fade_max, gmax, gstep, black_hold))
         print("  Pass E done")
         return
     if (fmax2, fstep2) != (gmax, gstep):
@@ -1240,9 +1383,37 @@ def pass_e():
               "exactly, the clamp in frame_fifo_read covers it"
               % (gstep, gmax))
 
-    fade_frames = 2 * fade_max
-    ok("fade is %d dimming frames + %d brightening = %d frames = %.2fs"
-       % (fade_max, fade_max, fade_frames, fade_frames / 60.0))
+    # Fade budgets, derived. The plain fade spends FADE_MAX frames dimming
+    # (level FADE_MAX..1, the last one being the tick that detects level <= 1)
+    # and FADE_MAX+1 brightening (level 0..FADE_MAX plus the detecting tick).
+    # The slow fade's hold_cnt[0] prescaler moves the level on every other
+    # frame, so both halves double except the first, which the exit test eats:
+    # 2*FADE_MAX-1 dimming plus 2*FADE_MAX+1 brightening. The black hold is the
+    # plain fade with BLACK_HOLD frames of true black inserted at the bottom,
+    # and the index change moves to the end of that hold so the swap happens
+    # while the panel is genuinely dark rather than merely dim.
+    if not (1 <= black_hold <= 63):
+        fail("BLACK_HOLD %d does not fit the 6 bit hold_cnt that counts it"
+             % black_hold)
+    fade_frames = 2 * fade_max + 1
+    slow_frames = 4 * fade_max
+    hold_frames = 2 * fade_max + 1 + black_hold
+    ok("fade is %d dimming + %d brightening = %d frames = %.2fs"
+       % (fade_max, fade_max + 1, fade_frames, fade_frames / 60.0))
+    ok("slow fade (mode D) is %d + %d = %d frames = %.2fs, %.2fx the plain fade"
+       % (2 * fade_max - 1, 2 * fade_max + 1, slow_frames,
+          slow_frames / 60.0, slow_frames / float(fade_frames)))
+    ok("black hold (mode E) is %d fade + %d black + %d fade = %d frames = %.2fs"
+       % (fade_max, black_hold, fade_max + 1, hold_frames, hold_frames / 60.0))
+    worst = max(fade_frames, slow_frames, hold_frames, total)
+    if worst / 60.0 >= 1.0:
+        fail("the longest transition is %d frames = %.2fs, which is not shorter "
+             "than the 1s auto play interval in sd_card_bmp, so the carousel "
+             "would retrigger a transition that is still in flight"
+             % (worst, worst / 60.0))
+    else:
+        ok("the longest of fade / slow fade / black hold / wipe is %d frames = "
+           "%.2fs, inside the 1s auto play interval" % (worst, worst / 60.0))
     check_reset_polarity()
     print("  Pass E done")
 
@@ -1254,19 +1425,31 @@ def _drive_transition(t, new_idx, mode):
     no dv_rise re-init fires. Ticks one frame at a time (frame_start=1), records
     the effect CODE the controller committed to when it left ST_IDLE, then keeps
     ticking until it settles back in ST_IDLE having reached new_idx. Returns the
-    code (1..6 band, 7 fade), or None if it never committed (caller treats None
-    as a fail). The band code is read off o_effect on the very tick that enters
-    ST_BAND, before ST_BAND completion clears it back to 0.
+    code, or None if it never committed (caller treats None as a fail).
+
+    The code is recovered from the state the controller entered plus the two
+    fade flags, because that is exactly what distinguishes the four non-band
+    arms: ST_BAND carries the band code in o_effect (read on the entering tick,
+    before ST_BAND completion clears it back to 0), ST_WIPE_END can only be
+    reached from the instant cut, and ST_FADE_OUT is plain fade unless
+    fade_slow (13) or fade_hold (14) was set on the same tick. Reserved 15
+    reports as 7, which is the point -- it falls into the default arm.
     """
     effect = None
-    guard = 4 * (t.FADE_MAX + t.WIPE_HOLD + t.WIPE_SETTLE) + 64
+    guard = 4 * (2 * t.FADE_MAX + t.WIPE_HOLD + t.WIPE_SETTLE +
+                 t.BLACK_HOLD) + 64
     for _ in range(guard):
         st_before = t.state
         t.tick(1, new_idx, 1, mode=mode)
-        if st_before == ST_IDLE and t.state == ST_BAND:
-            effect = t.o_effect            # 1..6
-        elif st_before == ST_IDLE and t.state == ST_FADE_OUT:
-            effect = 7                     # fade
+        if st_before == ST_IDLE and t.state != ST_IDLE:
+            if t.state == ST_BAND:
+                effect = t.o_effect
+            elif t.state == ST_WIPE_END:
+                effect = 12
+            elif t.state == ST_FADE_OUT:
+                effect = 13 if t.fade_slow else (14 if t.fade_hold else 7)
+            else:
+                effect = -1                # an exit the RTL does not have
         if effect is not None and t.state == ST_IDLE and t.cur_idx == new_idx:
             return effect
     return effect
@@ -1275,8 +1458,8 @@ def _drive_transition(t, new_idx, mode):
 def _effect_sequence(mode, n_transitions, cls=VideoTransition):
     """Return the list of effect codes for n picture changes under a fixed
     I_mode. Small counters keep it fast; the effect choice is decided once per
-    transition and is independent of FADE_MAX/WIPE_HOLD/WIPE_SETTLE."""
-    t = cls(fade_max=3, wipe_hold=6, wipe_settle=2)
+    transition and is independent of FADE_MAX/WIPE_HOLD/WIPE_SETTLE/BLACK_HOLD."""
+    t = cls(fade_max=3, wipe_hold=6, wipe_settle=2, black_hold=4)
     for _ in range(3):
         t.tick(0, 0, 0, mode=mode)          # display_valid low, dv_d clears
     t.tick(1, 0, 1, mode=mode)              # dv_rise commits idx 0 -> ST_FADE_IN
@@ -1305,61 +1488,95 @@ class _BrokenVideoTransition(VideoTransition):
                                     mode=swapped)
 
 
+class _BrokenAutoChain(VideoTransition):
+    """Negative control: an auto-cycle counter that walks 1..15 instead of
+    skipping 12/13/14, i.e. the one-line mistake of collapsing the three-way
+    chain into a plain increment-with-wrap. It puts a hard cut and a blackout
+    into the default carousel, which the chain assertion below must reject."""
+
+    def tick(self, display_valid, disp_idx, frame_start, mode=0):
+        before = self.effect_cnt
+        idle_before = self.state
+        VideoTransition.tick(self, display_valid, disp_idx, frame_start,
+                             mode=mode)
+        if idle_before == ST_IDLE and self.effect_cnt != before:
+            self.effect_cnt = 1 if before >= 15 else before + 1
+
+
 def _names(seq):
     return ','.join(EFF_NAMES.get(e, '?%d' % e) for e in seq)
 
 
 def pass_f():
-    print("Pass F  DIP I_mode (3 bit) selects the transition effect")
-    N = 8
-    seqs = {m: _effect_sequence(m, N) for m in range(8)}
-    if any(seqs[m] is None for m in range(8)):
+    print("Pass F  I_mode (4 bit) selects the transition effect")
+    N = len(AUTO_CHAIN) + 2                  # one full rotation plus the wrap
+    seqs = {m: _effect_sequence(m, N) for m in range(16)}
+    if any(seqs[m] is None for m in range(16)):
         fail("a mode never settled into a clean transition sequence: %s"
-             % {m: seqs[m] for m in range(8)})
+             % {m: seqs[m] for m in range(16)})
         print("  Pass F done")
         return
 
-    # expected: auto (000) rotates 7,1,2,3,4,5,6,7,...; forced 001..110 are a
-    # constant code; 111 forces fade. The rotation starts at 7 because
-    # effect_cnt resets to 7 and is read before it advances.
-    exp = {}
-    c = 7
-    auto = []
-    for _ in range(N):
-        auto.append(c)
-        c = 1 if c >= 7 else c + 1
-    exp[0] = auto
-    for m in range(1, 7):
+    # expected: auto (0) rotates 7,1..6,8..11 and wraps; 1..6 and 8..11 are a
+    # constant band code; 7 forces fade; 12/13/14 are the three non-band
+    # effects; 15 is reserved and falls into the default arm, so it reports as
+    # fade. The rotation starts at 7 because effect_cnt resets to 7 and is read
+    # before it advances.
+    exp = {0: [AUTO_CHAIN[i % len(AUTO_CHAIN)] for i in range(N)]}
+    for m in list(BAND_EFFECTS) + [7, 12, 13, 14]:
         exp[m] = [m] * N
-    exp[7] = [7] * N
-    labels = {0: 'auto-cycle', 7: 'fade only'}
+    exp[15] = [7] * N
+    labels = {0: 'auto-cycle', 7: 'fade only', 15: 'reserved=fade'}
 
-    for m in range(8):
+    for m in range(16):
         name = labels.get(m, EFF_NAMES[m] + ' only')
         if seqs[m] == exp[m]:
-            ok("mode %s (%-13s): %s"
-               % (format(m, '03b'), name, _names(seqs[m])))
+            ok("mode %X (%-16s): %s" % (m, name, _names(seqs[m][:6]) +
+                                        (',...' if N > 6 else '')))
         else:
-            fail("mode %s (%s) expected %s got %s"
-                 % (format(m, '03b'), name, _names(exp[m]), _names(seqs[m])))
+            fail("mode %X (%s) expected %s got %s"
+                 % (m, name, _names(exp[m]), _names(seqs[m])))
 
-    # Negative control: inject the swapped-code bug and confirm the mode-001
+    # The auto rotation must never surface 12/13/14. Those three are reachable
+    # only by an explicit serial-screen command; the default carousel a judge
+    # watches with no screen attached has to stay a sweep or a fade.
+    bad_auto = sorted({e for e in seqs[0] if e in (12, 13, 14)})
+    if bad_auto:
+        fail("auto-cycle surfaced non-band effects %s, which must be excluded "
+             "from the rotation" % _names(bad_auto))
+    else:
+        ok("auto-cycle never surfaces instant-cut / slow-fade / black-hold over "
+           "%d transitions" % N)
+
+    # Negative control 1: inject the swapped-code bug and confirm the mode-1
     # signature changes, proving the checks above can actually fail rather than
     # passing for any old mapping.
-    broken = _effect_sequence(0b001, N, cls=_BrokenVideoTransition)
+    broken = _effect_sequence(1, N, cls=_BrokenVideoTransition)
     if broken == exp[1]:
         fail("negative control is toothless: swapping 001/010 still produced the "
              "wipe-down signature")
     elif broken is None:
         fail("negative control did not run")
     else:
-        ok("negative control: swapping the forced codes turns mode 001 into %s, "
-           "which the wipe-down check rejects" % _names(broken))
+        ok("negative control: swapping the forced codes turns mode 1 into %s, "
+           "which the wipe-down check rejects" % _names(broken[:4]))
+
+    # Negative control 2: an auto chain that does not skip 12/13/14.
+    broken_chain = _effect_sequence(0, N, cls=_BrokenAutoChain)
+    if broken_chain is None:
+        fail("auto-chain negative control did not run")
+    elif not {12, 13, 14} & set(broken_chain):
+        fail("negative control is toothless: a 1..15 walking counter still "
+             "produced %s" % _names(broken_chain))
+    else:
+        ok("negative control: a plain 1..15 auto counter surfaces %s, which the "
+           "rotation check rejects"
+           % _names(sorted({12, 13, 14} & set(broken_chain))))
     print("  Pass F done")
 
 
 # ---------------------------------------------------------------------------
-# Pass G -- band effect geometry, all six effects across the ramp
+# Pass G -- band effect geometry, all ten effects across the ramp
 # ---------------------------------------------------------------------------
 
 def _band_sel(eff, progress, grp_max=REAL_GROUPS):
@@ -1394,8 +1611,33 @@ class _BrokenBandEngine(FrameFifoRead):
         return FrameFifoRead.select_top(g, progress, eff, grp_max)
 
 
+class _LooseNewBandEngine(FrameFifoRead):
+    """Negative control for Pass G4: the four new effects with their thresholds
+    written too loose, i.e. the mistake G4 exists to catch. Pincer forgets the
+    >>1 on progress, interlace and quad-interleave scale by 1.25x instead of
+    1.125x, and coarse blocks compares with <= instead of <. All four still
+    reach full coverage at grp_max, so the coverage assertion alone would pass
+    them; what gives them away is that they finish early, so groups that should
+    still be hidden at the probe progress are not, or the completion step moves.
+    """
+
+    @staticmethod
+    def select_top(g, progress, eff, grp_max=240):
+        if eff == 8:                                   # pincer, >>1 dropped
+            return 1 if (g < progress or g >= (grp_max - progress)) else 0
+        if eff in (9, 11):                             # 1.25x instead of 1.125x
+            scaled = progress + (progress >> 2)
+            if eff == 9:
+                return 1 if ((((g & 1) << 7) | (g >> 1)) < scaled) else 0
+            return 1 if ((((g & 3) << 6) | (g >> 2)) < scaled) else 0
+        if eff == 10:                                  # coarse blocks, <= not <
+            rank = int(format((g >> 4) & 0xF, '04b')[::-1], 2)
+            return 1 if (rank <= (progress >> 4)) else 0
+        return FrameFifoRead.select_top(g, progress, eff, grp_max)
+
+
 def pass_g():
-    print("Pass G  band effect geometry, six effects across the ramp")
+    print("Pass G  band effect geometry, ten effects across the ramp")
     ramp = list(range(REAL_STEP, REAL_GROUPS + 1, REAL_STEP))   # 8,16,..,240
     if ramp[-1] != REAL_GROUPS or len(ramp) != REAL_GROUPS // REAL_STEP:
         fail("the ramp does not land exactly on WIPE_GRP_MAX = %d" % REAL_GROUPS)
@@ -1439,7 +1681,7 @@ def pass_g():
            "all gi/prog at grp_max %s" % [REAL_GROUPS, 16, 8])
 
     # ---- G1, pure function: monotonic sweep to full coverage ----
-    for eff in range(1, 7):
+    for eff in BAND_EFFECTS:
         counts = [sum(_band_sel(eff, P)) for P in ramp]
         if counts[-1] != REAL_GROUPS:
             fail("effect %d (%s) does not fully reveal at progress %d: %d/%d "
@@ -1448,17 +1690,19 @@ def pass_g():
         if any(counts[i + 1] < counts[i] for i in range(len(counts) - 1)):
             fail("effect %d (%s) revealed count is not monotonic over the ramp: "
                  "%s" % (eff, EFF_NAMES[eff], counts))
-        # wipe down/up and comb must already show something on the first step;
-        # blinds legitimately waits until progress reaches one slat (16)
-        if counts[0] == 0 and eff in (1, 2, 6):
+        # wipe down/up, comb, pincer, interlace and quad-interleave must already
+        # show something on the first step; blinds (3) and coarse blocks (10)
+        # legitimately wait until progress reaches one whole 16 group slat,
+        # because both thresholds are progress >> 4.
+        if counts[0] == 0 and eff in (1, 2, 6, 8, 9, 11):
             fail("effect %d (%s) reveals nothing at the first ramp step"
                  % (eff, EFF_NAMES[eff]))
-    ok("G1  all six effects sweep monotonically to full coverage at progress %d"
-       % REAL_GROUPS)
+    ok("G1  all ten band effects sweep monotonically to full coverage at "
+       "progress %d" % REAL_GROUPS)
 
     # eyeball the sweep: first step, mid ramp, saturated, one strip per effect
-    for eff in range(1, 7):
-        print("      effect %d %-12s" % (eff, EFF_NAMES[eff]))
+    for eff in BAND_EFFECTS:
+        print("      effect %-2d %-16s" % (eff, EFF_NAMES[eff]))
         for P in (ramp[0], REAL_GROUPS // 2, REAL_GROUPS):
             print("        p=%3d |%s|" % (P, _band_strip(eff, P)))
 
@@ -1466,7 +1710,7 @@ def pass_g():
     bot_idx, top_idx = 1, 2
     base_bot, base_top = REAL_ADDRS[bot_idx], REAL_ADDRS[top_idx]
     probes = (ramp[0], REAL_GROUPS // 2, REAL_GROUPS)
-    for eff in range(1, 7):
+    for eff in BAND_EFFECTS:
         for P in probes:
             m = FrameFifoRead(REAL_ADDRS, REAL_LEN, burst_size=REAL_BURST,
                               wipe=True, wipe_grp_max=REAL_GROUPS,
@@ -1526,7 +1770,384 @@ def pass_g():
         ok("G3  negative control: without the saturation guard blinds/split leave "
            "%s groups unrevealed at full ramp, which the coverage check rejects"
            % holes)
+
+    # ---- G4, the four new effects need NO saturation guard, and that is a
+    # measured fact rather than a hope ----
+    # Each of 8..11 maps gi through a pure wiring permutation (bit reverse /
+    # rotate, zero logic) and compares against a threshold that already exceeds
+    # every key the permutation can produce once progress reaches grp_max. So
+    # unlike blinds and split they carry no `progress >= grp_max` short circuit,
+    # which keeps a subtractor and an OR off the ext_mem_clk path. Two things
+    # have to hold for that to be safe, and both are asserted here:
+    #   (a) full reveal AT grp_max, so the panel is never left with a stale
+    #       horizontal band after the sweep finishes;
+    #   (b) groups still unrevealed one uniform probe step earlier, so the
+    #       threshold is not merely written loose enough to always pass (a).
+    # The probe is progress 208, NOT the 232 the plan first suggested: 232 is
+    # not uniform, because interlace and quad-interlace scale their threshold to
+    # 261 there and have already finished. Their exact completion step on the
+    # 8-stepped ramp is 224; pincer and coarse blocks complete exactly at 240.
+    # Pinning the completion step per effect is what catches an off-by-one in a
+    # threshold that (b) alone would miss.
+    PROBE = 208
+    exp_complete = {8: 240, 9: 224, 10: 240, 11: 224}
+    for eff in (8, 9, 10, 11):
+        full = sum(_band_sel(eff, REAL_GROUPS))
+        left = REAL_GROUPS - sum(_band_sel(eff, PROBE))
+        first_full = next((P for P in ramp if sum(_band_sel(eff, P)) == REAL_GROUPS),
+                          None)
+        if full != REAL_GROUPS:
+            fail("effect %d (%s) leaves %d groups unrevealed at progress %d even "
+                 "though it has no saturation guard"
+                 % (eff, EFF_NAMES[eff], REAL_GROUPS - full, REAL_GROUPS))
+        if left == 0:
+            fail("effect %d (%s) is already fully revealed at the probe progress "
+                 "%d, so the full-coverage check proves nothing about it"
+                 % (eff, EFF_NAMES[eff], PROBE))
+        if first_full != exp_complete[eff]:
+            fail("effect %d (%s) completes at progress %s, expected %d"
+                 % (eff, EFF_NAMES[eff], first_full, exp_complete[eff]))
+        if not (full == REAL_GROUPS and left and first_full == exp_complete[eff]):
+            continue
+        ok("G4  effect %-2d (%-16s): full at %d, %3d still hidden at p=%d, "
+           "completes exactly at p=%d"
+           % (eff, EFF_NAMES[eff], REAL_GROUPS, left, PROBE, first_full))
+
+    loose_holes = {e: REAL_GROUPS - sum(_LooseNewBandEngine.select_top(
+                       g, PROBE, e, REAL_GROUPS) for g in range(REAL_GROUPS))
+                   for e in (8, 9, 10, 11)}
+    loose_complete = {
+        e: next((P for P in ramp
+                 if sum(_LooseNewBandEngine.select_top(g, P, e, REAL_GROUPS)
+                        for g in range(REAL_GROUPS)) == REAL_GROUPS), None)
+        for e in (8, 9, 10, 11)}
+    caught = [e for e in (8, 9, 10, 11)
+              if loose_holes[e] == 0 or loose_complete[e] != exp_complete[e]]
+    if len(caught) != 4:
+        fail("G4 negative control is toothless: loosening the thresholds was only "
+             "caught for %s (hidden at p=%d: %s, completes: %s)"
+             % (caught, PROBE, loose_holes, loose_complete))
+    else:
+        ok("G4  negative control: loosened thresholds (pincer forgetting >>1, "
+           "interlace/quad scaling 1.25x instead of 1.125x, coarse blocks using "
+           "<= ) are all caught -- hidden at p=%d %s, completion steps %s"
+           % (PROBE, loose_holes, loose_complete))
     print("  Pass G done")
+
+
+# ---------------------------------------------------------------------------
+# Pass H -- the three non-band effects, frame by frame
+# ---------------------------------------------------------------------------
+#
+# 12/13/14 never reach the band engine at all: O_effect stays 0 and the two
+# selectors are never driven apart, so frame_fifo_read sees wipe_sel_diff == 0
+# on every one of these frames and the whole of Pass B/C/D still applies to
+# them unchanged. What is new is the controller's own sequencing, and that is
+# what this pass traces: how many frames each effect takes, on which frame the
+# picture index actually changes, and what the panel's brightness does in
+# between.
+
+def _trace_nonband(mode, cls=VideoTransition, fade_max=8, black_hold=12,
+                   wipe_settle=2, from_idx=0, to_idx=1):
+    """Run one transition and return the per-frame record.
+
+    Returns (frames, t) where frames[i] is the state AFTER the (i+1)-th
+    I_frame_start with the new index pending: (state, bot, top, img, level,
+    o_effect, hold_cnt). frames[0] is therefore the commit tick itself, which
+    is the frame the panel is still showing the OLD picture on for every effect
+    except the instant cut. Returns (None, t) if the controller did not arrive
+    in ST_IDLE at full brightness first, i.e. the precondition is broken and
+    the trace would mean nothing.
+    """
+    t = cls(fade_max=fade_max, wipe_hold=6, wipe_settle=wipe_settle,
+            black_hold=black_hold)
+    for _ in range(3):
+        t.tick(0, from_idx, 0, mode=mode)      # display_valid low, dv_d clears
+    t.tick(1, from_idx, 1, mode=mode)          # dv_rise commits -> ST_FADE_IN
+    for _ in range(4 * fade_max + 8):
+        t.tick(1, from_idx, 1, mode=mode)
+        if t.state == ST_IDLE:
+            break
+    if (t.state != ST_IDLE or t.cur_idx != from_idx
+            or t.fade_level != fade_max or t.hold_cnt != 0):
+        return None, t
+    frames = []
+    for _ in range(4 * (2 * fade_max + black_hold) + 16):
+        t.tick(1, to_idx, 1, mode=mode)
+        frames.append((t.state, t.bot_idx, t.top_idx, t.img_idx,
+                       t.fade_level, t.o_effect, t.hold_cnt))
+        if t.state == ST_IDLE and t.cur_idx == to_idx:
+            break
+    return frames, t
+
+
+class _CutLeavesTopBehind(VideoTransition):
+    """Negative control: the instant cut moves O_bot_idx but forgets
+    O_top_idx, leaving the two selectors apart for the whole WIPE_SETTLE tail.
+    frame_fifo_read reads that disagreement as "start a band sweep" while
+    O_effect is 0, so select_top falls into its default arm and returns 0 for
+    every group -- the engine ramps a boundary that never redirects, and the
+    panel keeps showing the outgoing picture for two frames after the cut.
+    """
+
+    def tick(self, display_valid, disp_idx, frame_start, mode=0):
+        st_before = self.state
+        bot_before = self.bot_idx
+        VideoTransition.tick(self, display_valid, disp_idx, frame_start,
+                             mode=mode)
+        if st_before == ST_IDLE and self.state == ST_WIPE_END:
+            self.top_idx = bot_before
+
+
+class _SlowFadeFlagUnread(VideoTransition):
+    """Negative control: fade_slow is written at the commit but the prescaler
+    gate never reads it, so effect 13 collapses into the plain fade. This is
+    the realistic failure mode of a flag-and-arm design -- the flag is set in
+    one branch and consumed in another, and forgetting the consumer
+    synthesises cleanly and looks correct on a scope at the wrong zoom."""
+
+    def tick(self, display_valid, disp_idx, frame_start, mode=0):
+        st_before = self.state
+        VideoTransition.tick(self, display_valid, disp_idx, frame_start,
+                             mode=mode)
+        if st_before == ST_IDLE and self.state == ST_FADE_OUT:
+            self.fade_slow = 0
+
+
+class _BlackHoldFlagUnread(VideoTransition):
+    """Negative control: fade_hold is written at the commit but ST_FADE_OUT
+    never reads it, so effect 14 never enters ST_BLACK and collapses into the
+    plain fade. Same bug class as _SlowFadeFlagUnread."""
+
+    def tick(self, display_valid, disp_idx, frame_start, mode=0):
+        st_before = self.state
+        VideoTransition.tick(self, display_valid, disp_idx, frame_start,
+                             mode=mode)
+        if st_before == ST_IDLE and self.state == ST_FADE_OUT:
+            self.fade_hold = 0
+
+
+def _swap_frame(frames, to_idx):
+    """Index of the first frame whose O_img_idx is already the new picture."""
+    for i, f in enumerate(frames):
+        if f[3] == to_idx:
+            return i
+    return None
+
+
+def _levels(frames):
+    return [f[4] for f in frames]
+
+
+def pass_h():
+    print("Pass H  the three non-band effects, frame by frame")
+    FM, BH, WS = 8, 12, 2
+    tr = {m: _trace_nonband(m, fade_max=FM, black_hold=BH, wipe_settle=WS)[0]
+          for m in (7, 12, 13, 14, 15)}
+    if any(tr[m] is None for m in tr):
+        fail("a trace never reached the ST_IDLE / full-brightness precondition: "
+             "%s" % {m: (tr[m] is None) for m in tr})
+        print("  Pass H done")
+        return
+
+    # ---- H0, none of them ever touches the band engine ----
+    for m in (7, 12, 13, 14, 15):
+        apart = [i for i, f in enumerate(tr[m]) if f[1] != f[2]]
+        coded = [i for i, f in enumerate(tr[m]) if f[5] != 0]
+        if apart or coded:
+            fail("mode %X drove the selectors apart on frames %s or carried a "
+                 "band code on frames %s; the band engine must stay inert"
+                 % (m, apart[:4], coded[:4]))
+    ok("H0  modes 7/C/D/E/F keep O_effect 0 and the two selectors equal on "
+       "every frame, so frame_fifo_read never starts a band sweep")
+
+    # ---- H1, plain fade (7) is the untouched baseline ----
+    # FADE_MAX frames dimming (the last one being the tick that detects
+    # level <= 1 and swaps the index), then FADE_MAX+1 brightening.
+    want_len = 1 + FM + (FM + 1)
+    if len(tr[7]) != want_len:
+        fail("plain fade took %d frames, expected %d" % (len(tr[7]), want_len))
+    if _swap_frame(tr[7], 1) != FM:
+        fail("plain fade changed picture on frame %s, expected %d"
+             % (_swap_frame(tr[7], 1), FM))
+    blacks = [i for i, l in enumerate(_levels(tr[7])) if l == 0]
+    if blacks != [FM]:
+        fail("plain fade was black on frames %s, expected exactly [%d] (the "
+             "handover frame)" % (blacks, FM))
+    if _levels(tr[7]) != ([FM] + list(range(FM - 1, -1, -1))
+                          + list(range(1, FM + 1)) + [FM]):
+        fail("plain fade level sequence is %s" % _levels(tr[7]))
+    else:
+        ok("H1  plain fade (7): %d frames, one black handover frame at %d, "
+           "levels %s" % (len(tr[7]), FM, _levels(tr[7])[:5]))
+
+    # ---- H2, reserved F must be bit-identical to plain fade ----
+    if tr[15] != tr[7]:
+        fail("reserved mode F is not identical to plain fade; it must fall "
+             "into the default arm of the case")
+    else:
+        ok("H2  reserved mode F traces identically to plain fade over all %d "
+           "frames" % len(tr[7]))
+
+    # ---- H3, instant cut (C): one frame, no dimming at all ----
+    want_len = 1 + WS
+    if len(tr[12]) != want_len:
+        fail("instant cut took %d frames, expected %d (commit plus "
+             "WIPE_SETTLE)" % (len(tr[12]), want_len))
+    if _swap_frame(tr[12], 1) != 0:
+        fail("instant cut changed picture on frame %s, expected 0 -- every "
+             "index must move on the commit tick itself"
+             % _swap_frame(tr[12], 1))
+    if any(l != FM for l in _levels(tr[12])):
+        fail("instant cut dimmed the panel: levels %s" % _levels(tr[12]))
+    if [f[0] for f in tr[12]] != [ST_WIPE_END] * WS + [ST_IDLE]:
+        fail("instant cut state path is %s"
+             % [ST_NAMES[f[0]] for f in tr[12]])
+    if (_swap_frame(tr[12], 1) == 0 and len(tr[12]) == want_len
+            and all(l == FM for l in _levels(tr[12]))):
+        ok("H3  instant cut (C): picture changes on the commit frame, %d "
+           "frames total, brightness pinned at %d throughout"
+           % (len(tr[12]), FM))
+
+    # ---- H4, slow fade (D): the prescaler doubles both halves ----
+    # 2*FADE_MAX-1 dimming frames plus 2*FADE_MAX+1 brightening, so the total
+    # is 4*FADE_MAX+1 including the commit tick. FADE_MAX is deliberately NOT
+    # raised to get this: video_fade's scale_channel is 4 bits with 8 as unity
+    # gain, so levels 9..16 land in its default arm and stop attenuating.
+    want_len = 1 + (2 * FM - 1) + (2 * FM + 1)
+    if len(tr[13]) != want_len:
+        fail("slow fade took %d frames, expected %d" % (len(tr[13]), want_len))
+    if _swap_frame(tr[13], 1) != 2 * FM - 1:
+        fail("slow fade changed picture on frame %s, expected %d"
+             % (_swap_frame(tr[13], 1), 2 * FM - 1))
+    if len(tr[13]) <= len(tr[7]):
+        fail("slow fade (%d frames) is not longer than the plain fade (%d)"
+             % (len(tr[13]), len(tr[7])))
+    lv = _levels(tr[13])
+    if sorted(set(lv)) != list(range(FM + 1)):
+        fail("slow fade visited levels %s, expected the same 0..%d range as the "
+             "plain fade" % (sorted(set(lv)), FM))
+    # the prescaler: the level moves on every OTHER frame, so two consecutive
+    # frames must never both change it. The exit tick is excluded on purpose --
+    # `if (O_fade_level <= 4'd1)` forces the level to 0 unconditionally, so it
+    # always follows a decrement and is not a prescaler failure.
+    moves = [i for i in range(1, len(lv)) if lv[i] != lv[i - 1]]
+    dim_end = 2 * FM - 1                    # the exit tick
+    dim_moves = [i for i in moves if i < dim_end]
+    br_moves = [i for i in moves if i > dim_end]
+    adjacent = ([i for i in dim_moves if (i - 1) in dim_moves]
+                + [i for i in br_moves if (i - 1) in br_moves])
+    steps = sorted({abs(lv[i] - lv[i - 1]) for i in moves})
+    if adjacent:
+        fail("slow fade changed the level on consecutive frames at %s, the "
+             "hold_cnt[0] prescaler is not dividing" % adjacent[:6])
+    if steps != [1]:
+        fail("slow fade moved the level by %s, expected one level per move"
+             % steps)
+    if dim_moves != list(range(2, dim_end, 2)):
+        fail("slow fade dimmed on frames %s, expected every other frame %s"
+             % (dim_moves, list(range(2, dim_end, 2))))
+    # and because the prescaler also eats the first brightening frame, the
+    # panel is black for TWO frames rather than the plain fade's one
+    blacks = [i for i, l in enumerate(lv) if l == 0]
+    if blacks != [2 * FM - 1, 2 * FM]:
+        fail("slow fade was black on frames %s, expected %s"
+             % (blacks, [2 * FM - 1, 2 * FM]))
+    if (len(tr[13]) == want_len and not adjacent and steps == [1]
+            and dim_moves == list(range(2, dim_end, 2))
+            and blacks == [2 * FM - 1, 2 * FM]):
+        ok("H4  slow fade (D): %d frames (%.2fx the plain fade's %d), levels "
+           "move every other frame, %d black frames at the handover"
+           % (len(tr[13]), len(tr[13]) / float(len(tr[7]) - 1), len(tr[7]) - 1,
+              len(blacks)))
+
+    # ---- H5, black hold (E): the swap happens at the END of the dark ----
+    want_len = 1 + FM + BH + (FM + 1)
+    if len(tr[14]) != want_len:
+        fail("black hold took %d frames, expected %d" % (len(tr[14]), want_len))
+    dark = [i for i, f in enumerate(tr[14]) if f[0] == ST_BLACK]
+    if not dark:
+        fail("black hold never entered ST_BLACK at all: states %s"
+             % [ST_NAMES[f[0]] for f in tr[14]])
+        print("  Pass H done")
+        return
+    if len(dark) != BH:
+        fail("ST_BLACK dwelled for %d frames, expected BLACK_HOLD = %d"
+             % (len(dark), BH))
+    elif dark != list(range(dark[0], dark[0] + BH)):
+        fail("ST_BLACK was not contiguous: %s" % dark)
+    # throughout the hold the level is 0 AND the selectors are still on the
+    # OUTGOING picture, so the panel is showing true black, not merely dim
+    not_dark = [i for i in dark if tr[14][i][4] != 0]
+    if not_dark:
+        fail("the panel was not black during ST_BLACK on frames %s (levels %s)"
+             % (not_dark, [tr[14][i][4] for i in not_dark]))
+    # The swap is performed by the ST_BLACK arm on the tick that LEAVES the
+    # state, so it first becomes visible one frame after the last recorded
+    # ST_BLACK frame -- i.e. at the very end of the dark, not at its start.
+    # That frame is still level 0 as well (ST_FADE_IN has not incremented yet
+    # when the trace records it), so the panel is black for BH+1 frames.
+    if _swap_frame(tr[14], 1) != dark[-1] + 1:
+        fail("black hold changed picture on frame %s, expected %d -- the swap "
+             "must land at the END of the hold so it happens while the screen "
+             "is genuinely dark" % (_swap_frame(tr[14], 1), dark[-1] + 1))
+    still_old = [i for i in dark if tr[14][i][3] != 0]
+    if still_old:
+        fail("the picture index moved during the hold on frames %s" % still_old)
+    zero_frames = [i for i, l in enumerate(_levels(tr[14])) if l == 0]
+    if zero_frames != list(range(dark[0], dark[-1] + 2)):
+        fail("black hold was black on frames %s, expected the contiguous run %s"
+             % (zero_frames, list(range(dark[0], dark[-1] + 2))))
+    if (len(tr[14]) == want_len and len(dark) == BH and not not_dark
+            and _swap_frame(tr[14], 1) == dark[-1] + 1 and not still_old
+            and zero_frames == list(range(dark[0], dark[-1] + 2))):
+        ok("H5  black hold (E): %d frames total, %d in ST_BLACK at level 0 on "
+           "the outgoing picture (%d black frames overall), index swaps on "
+           "frame %d" % (len(tr[14]), BH, len(zero_frames), dark[-1] + 1))
+
+    # ---- H6, negative controls: the flag-written-but-never-read bug class ----
+    slow_broken = _trace_nonband(13, cls=_SlowFadeFlagUnread, fade_max=FM,
+                                 black_hold=BH, wipe_settle=WS)[0]
+    if slow_broken is None:
+        fail("slow-fade negative control did not run")
+    elif len(slow_broken) == len(tr[13]):
+        fail("negative control is toothless: without the prescaler the slow "
+             "fade still took %d frames" % len(slow_broken))
+    else:
+        ok("H6  negative control: an unread fade_slow collapses mode D into %d "
+           "frames (identical to the plain fade trace: %s), which the %d frame "
+           "length check rejects"
+           % (len(slow_broken), slow_broken == tr[7], len(tr[13])))
+
+    hold_broken = _trace_nonband(14, cls=_BlackHoldFlagUnread, fade_max=FM,
+                                 black_hold=BH, wipe_settle=WS)[0]
+    if hold_broken is None:
+        fail("black-hold negative control did not run")
+    elif any(f[0] == ST_BLACK for f in hold_broken):
+        fail("negative control is toothless: ST_BLACK was still entered without "
+             "the fade_hold read")
+    elif len(hold_broken) == len(tr[14]):
+        fail("negative control is toothless: without ST_BLACK the black hold "
+             "still took %d frames" % len(hold_broken))
+    else:
+        ok("H6  negative control: an unread fade_hold never enters ST_BLACK and "
+           "takes %d frames instead of %d, which the dwell check rejects"
+           % (len(hold_broken), len(tr[14])))
+
+    cut_broken = _trace_nonband(12, cls=_CutLeavesTopBehind, fade_max=FM,
+                                black_hold=BH, wipe_settle=WS)[0]
+    if cut_broken is None:
+        fail("instant-cut negative control did not run")
+    else:
+        apart = [i for i, f in enumerate(cut_broken) if f[1] != f[2]]
+        if not apart:
+            fail("negative control is toothless: leaving O_top_idx behind did "
+                 "not drive the selectors apart")
+        else:
+            ok("H6  negative control: an instant cut that forgets O_top_idx "
+               "leaves the selectors apart on frames %s, which the H0 band-"
+               "inert check rejects" % apart)
+    print("  Pass H done")
 
 
 def main():
@@ -1545,6 +2166,8 @@ def main():
     pass_f()
     print()
     pass_g()
+    print()
+    pass_h()
     print()
     print("=" * 72)
     if failures:

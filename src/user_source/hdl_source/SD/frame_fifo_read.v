@@ -46,7 +46,7 @@ module frame_fifo_read
 	input[ADDR_BITS - 1:0]           read_addr_3,                // data read module read request base address 1, used when read_addr_index = 3
 	input[1:0]                       read_addr_index,            // select valid base address from read_addr_0 read_addr_1 read_addr_2 read_addr_3
 	input[1:0]                       read_addr_index_top,        // stage 4: selector for the region ABOVE the wipe boundary. Drive it equal to read_addr_index when no wipe is running and this module behaves exactly as it did before.
-	input[2:0]                       effect,                     // stage 5: band effect code 1..6 (wipe down/up, blinds, split, random bars, comb); 0 and 7 mean no band redirect. From video_transition, synchronised into mem_clk exactly like the two index selectors.
+	input[3:0]                       effect,                     // stage 5: band effect code 1..6 (wipe down/up, blinds, split, random bars, comb) or 8..11 (pincer, interlace, coarse blocks, quad interlace); 0, 7 and 12..15 mean no band redirect. From video_transition, synchronised into mem_clk exactly like the two index selectors.
 	input[ADDR_BITS - 1:0]           read_len,                   // data read module read request data length
 	output reg                       fifo_aclr,                  // to fifo asynchronous clear
 	input[9:0]                      wrusedw                     // from fifo write used words
@@ -74,8 +74,8 @@ reg[1:0]                             read_addr_index_d0;         //synchronize t
 reg[1:0]                             read_addr_index_d1;         //synchronize to 'mem_clk' clock domain second
 reg[1:0]                             read_addr_index_top_d0;     //stage 4, same two beat synchroniser for the wipe selector
 reg[1:0]                             read_addr_index_top_d1;
-reg[2:0]                             effect_d0;                  //stage 5, same two beat synchroniser for the band effect code
-reg[2:0]                             effect_d1;
+reg[3:0]                             effect_d0;                  //stage 5, same two beat synchroniser for the band effect code
+reg[3:0]                             effect_d1;
 reg[8:0]                             progress;                   //band ramp position in two line groups: advances once per frame read, frozen for the whole frame so every group evaluates select_top against the same value
 reg[8:0]                             g;                          //group index within the frame, 0..240, advances at every group aligned burst boundary while the selectors disagree
 reg[8:0]                             g_plus1;                    //g + 1, registered so next_sel_comb reads a flop instead of an adder; the 1 cycle lag is invisible because next_sel_r is only consumed at group boundaries ~1280 cycles after g last moved
@@ -146,11 +146,30 @@ endfunction
 // tools/sim_transition.py checks for. WIPE_GRP_MAX is 240 here, so the blinds
 // slat is 16 groups (15 slats), the split centre is 120, and bitrev8 spreads the
 // 240 group indices over 0..255.
+//
+// Codes 8..B are the four effects added for the serial screen. They need NO
+// saturation guard, because each one compares a pure bit permutation of gi (a
+// bit reverse or a rotate -- free wiring, no logic and, critically, no
+// subtractor in series with gi) against a threshold the ramp provably outruns:
+//
+//   8 pincer     gi < (prog>>1) || gi >= 240-(prog>>1); at prog=240 that is
+//                gi<120 || gi>=120, true for every gi, and at prog=0 false for
+//                every gi.
+//   9 interlace  key {gi[0],gi[7:1]} <= 128+119 = 247 < prog+(prog>>3) at 240,
+//                which is 270.
+//   A coarse     key bitrev4(gi[7:4]) <= 14 (gi <= 239 so gi[7:4] <= 14, and
+//                bitrev4 is a bijection) < prog>>4 at 240, which is 15.
+//   B quad       key {gi[1:0],gi[7:2]} <= 3*64+59 = 251 < 270.
+//
+// The existing six case items still say 3'd. That is deliberate: Verilog
+// zero-extends case items to the width of the case expression, so their geometry
+// is bit-for-bit what it was when eff was 3 bits, and leaving the text alone
+// makes that claim checkable by inspection rather than by re-derivation.
 // ---------------------------------------------------------------------------
 function select_top;
 	input [8:0] gi;
 	input [8:0] prog;
-	input [2:0] eff;
+	input [3:0] eff;
 	reg [8:0] half;
 	reg [7:0] rank;
 	reg [8:0] scaled;
@@ -173,7 +192,17 @@ function select_top;
 				select_top = ((rank < scaled) || (prog >= WIPE_GRP_MAX));
 			end
 			3'd6: select_top = gi[0] ? (gi >= (WIPE_GRP_MAX - prog)) : (gi < prog);   //comb: even groups wipe down, odd groups wipe up
-			default: select_top = 1'b0;                                            //0 and 7 are fade / idle: no band redirect
+			4'd8: select_top = ((gi < (prog >> 1)) || (gi >= (WIPE_GRP_MAX - (prog >> 1)))); //pincer: two wipes close on the centre line from both edges
+			4'd9: begin                                                            //interlace: all even lines sweep first, then all odd lines
+				scaled = prog + (prog >> 3);
+				select_top = ({gi[0], gi[7:1]} < scaled);
+			end
+			4'd10: select_top = ({gi[4], gi[5], gi[6], gi[7]} < (prog >> 4));      //coarse blocks: 15 blocks of 16 groups, bit reversed fill order
+			4'd11: begin                                                           //quad interlace: four passes, phase gi[1:0] = 0,1,2,3
+				scaled = prog + (prog >> 3);
+				select_top = ({gi[1:0], gi[7:2]} < scaled);
+			end
+			default: select_top = 1'b0;                                            //0, 7 and C..F are fade / non band: no band redirect
 		endcase
 	end
 endfunction
@@ -232,8 +261,8 @@ begin
 		read_addr_index_d1 <= 2'b00;
 		read_addr_index_top_d0 <= 2'b00;
 		read_addr_index_top_d1 <= 2'b00;
-		effect_d0 <= 3'b000;
-		effect_d1 <= 3'b000;
+		effect_d0 <= 4'b0000;
+		effect_d1 <= 4'b0000;
 	end
 	else
 	begin

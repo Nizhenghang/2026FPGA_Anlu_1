@@ -12,7 +12,16 @@ module sd_card_bmp #(
     // past it and nothing ever walks it back. Retrying the whole picture from
     // its header is what turns a transient bit error into a slightly longer
     // startup instead of a permanently short carousel.
-    parameter [2:0]   LOAD_MAX_RETRY    = 3'd3
+    parameter [2:0]   LOAD_MAX_RETRY    = 3'd3,
+    // When music is allowed to start. 1: together with the first picture, so
+    // audio and video reach the panel on the same event and the remaining
+    // pictures load in the background while the track plays. 0: the old
+    // behaviour, music waits until every picture is committed -- which puts
+    // roughly five seconds of silent slideshow on screen first, and makes a
+    // single picture that never commits cost the music as well. Retreat switch
+    // only; the sector arbiter below works either way, because with 0 the two
+    // consumers go back to being strictly time-disjoint.
+    parameter         AUDIO_START_ON_FIRST_IMAGE = 1'b1
 )(
     input                       clk,
     input                       rst,
@@ -26,6 +35,12 @@ module sd_card_bmp #(
     input                       cmd_auto_pulse,
     input       [1:0]           cmd_img_sel,
     input                       cmd_img_sel_pulse,
+    // Audio source select (screen command MUSC), already 2FF synchronised into
+    // this domain by the top level like everything else above. 1 = play the
+    // TF-card WAV, 0 = the built-in test tone owns the audio output and this
+    // module must not arm the streamer at all, so it never requests a sector and
+    // bmp_read gets the whole port.
+    input                       music_req,
     output [3:0]                state_code,
     output reg                  display_valid,
     output                      auto_play_enabled,
@@ -53,17 +68,30 @@ module sd_card_bmp #(
 
     // Bring-up visibility for a silent audio chain, read by the 7-segment in the
     // top level. dbg_audio_chain is {wav_found, audio_phase, ever_we, fault}:
-    // the scan saw a WAV, the SD port was handed to the streamer, the streamer
-    // wrote at least one frame, and it rejected the header. dbg_aud_wr_peak is a
-    // sticky high-water mark of aud_fifo_wrusedw[8:5], so a FIFO that filled and
-    // drained again still reads back how full it got.
+    // the scan saw a WAV, the streamer is armed, the streamer has written at
+    // least one frame since power-up, and it rejected the header.
+    // dbg_aud_wr_peak is a sticky high-water mark of aud_fifo_wrusedw[8:5], so a
+    // FIFO that filled and drained again still reads back how full it got.
     output [3:0]                dbg_audio_chain,
     output reg [3:0]            dbg_aud_wr_peak,
 
-    // chain == 8 says the hand-off gate never fired, but not which of its
-    // inputs held it off. dbg_gate is {bmp_ready, ~load_busy, scan_done,
-    // display_valid} and dbg_loaded_cnt is img_loaded_count, so one more
-    // readout names the stuck term instead of guessing at it.
+    // chain == 8 says the streamer is not armed, but not which input holds it
+    // off. There are now three, and the third is not a fault: the screen has not
+    // selected the music source (music_req low), which is the power-up default
+    // and means the built-in test tone owns the audio output. Tell them apart by
+    // ear and by the OSD line 3 echo, not by this nibble.
+    //
+    // The other two: under AUDIO_START_ON_FIRST_IMAGE, wav_found and
+    // first_image_committed. display_valid rises on the very same
+    // load_complete_now that sets the latter, so dbg_gate bit0 already names the
+    // stuck term -- either no WAV was found or no picture ever committed. The
+    // other three bits of dbg_gate ({bmp_ready, ~load_busy, scan_done}) are the
+    // terms of the AUDIO_START_ON_FIRST_IMAGE == 0 retreat gate, and are what to
+    // read with that parameter cleared. dbg_loaded_cnt is img_loaded_count.
+    //
+    // ever_we is sticky and survives a source switch, so chain bit1 reads 1
+    // forever after the music has played once. It answers "did PCM ever reach
+    // the FIFO write side", never "is music playing now".
     output [3:0]                dbg_gate,
     output [3:0]                dbg_loaded_cnt,
 
@@ -90,15 +118,28 @@ wire [31:0]      sd_sec_read_addr;
 wire [7:0]       sd_sec_read_data;
 wire             sd_sec_read_data_valid;
 wire             sd_sec_read_end;
-// Two disjoint consumers of the single SD sector-read port: bmp_read (pictures)
-// and sd_audio_stream (music). They never run at the same time -- audio_phase
-// only rises after the last picture is committed -- so a 2:1 mux on the request
-// and address is enough; the data/valid/end come back from sd_card_top and are
-// broadcast to both (the idle consumer ignores them).
+// Two consumers of the single SD sector-read port: bmp_read (pictures) and
+// sd_audio_stream (music). They share it sector by sector through the one-hot
+// arbiter below rather than being kept strictly time-disjoint, which is what
+// lets the track start on the same event as the first picture instead of after
+// the last one. sd_card_sec_read_write latches the address in S_WAIT_READ_WRITE
+// on any cycle sd_sec_read is high and only returns there through the
+// single-cycle S_READ_END, so a sector is atomic and its boundary is the only
+// safe point to change hands.
 wire             bmp_sd_sec_read;
 wire [31:0]      bmp_sd_sec_read_addr;
 wire             aud_sd_sec_read;
 wire [31:0]      aud_sd_sec_read_addr;
+// Per-owner views of the shared response. Gating at the instantiation boundary
+// is what keeps bmp_read.v and sd_audio_stream.v untouched: each only ever sees
+// the bytes and the end pulse belonging to a sector it asked for. Without it an
+// audio sector landing while bmp_read sits in ST_LOAD_HDR would walk rd_cnt and
+// corrupt the header parse, and one landing during ST_LOAD_DATA would be counted
+// into bmp_len_cnt, shifting every later pixel.
+wire             bmp_sec_data_valid;
+wire             bmp_sec_read_end;
+wire             aud_sec_data_valid;
+wire             aud_sec_read_end;
 wire             aud_dbg_ever_we;
 wire             aud_dbg_fault;
 wire             bmp_data_wr_en;
@@ -146,12 +187,18 @@ reg [31:0]       load_stall_cnt;
 reg              load_abort;
 reg [2:0]        load_retry_cnt;
 
-// WAV directory entry captured during the scan, and the sticky flag that hands
-// the SD port over to sd_audio_stream once every picture is loaded.
+// WAV directory entry captured during the scan, and the sticky enable that
+// starts sd_audio_stream. It no longer hands over the whole SD port: the arbiter
+// below shares it sector by sector, so this is purely "the track may play now".
 reg              wav_found;
 reg [31:0]       wav_sector;
 reg [31:0]       wav_size;
 reg              audio_phase;
+// One-hot ownership of the SD sector-read port for the sector in flight. See the
+// arbiter block below for why these are one-hot rather than a grant flag plus a
+// select bit: the gated response wires are a single AND with a register each.
+reg              arb_bmp_own;
+reg              arb_aud_own;
 reg              dbg_stall_seen;
 reg              dbg_hdr_seen;
 
@@ -174,9 +221,74 @@ wire       load_gave_up;
 // valid without any change there. bmp_data_wr_en only feeds the scaler.
 assign write_en   = scaler_dst_valid;
 assign write_data = {scaler_dst_pixel, 8'b0};
-// SD sector-read port ownership: pictures first, music after they are all in.
-assign sd_sec_read      = audio_phase ? aud_sd_sec_read      : bmp_sd_sec_read;
-assign sd_sec_read_addr = audio_phase ? aud_sd_sec_read_addr : bmp_sd_sec_read_addr;
+// Music start condition. AUDIO_START_ON_FIRST_IMAGE picks between syncing to the
+// first picture and the old wait-for-everything behaviour; see the parameter.
+// music_req gates the whole thing: with the test tone selected the streamer is
+// never armed, so it never enters the sector arbiter and the picture loads run
+// unopposed.
+wire audio_start_now = music_req &&
+                       (AUDIO_START_ON_FIRST_IMAGE
+                       ? first_image_committed
+                       : (bmp_ready && !load_busy &&
+                          (img_loaded_count >= SCAN_TARGET_COUNT)));
+
+// ---------------------------------------------------------------------------
+// SD sector-read port arbiter.
+//
+// A grant lasts exactly one sector. sd_card_sec_read_write latches the address
+// in S_WAIT_READ_WRITE on any cycle sd_sec_read is high and returns to that
+// state only via the single-cycle S_READ_END, so releasing on sd_sec_read_end
+// hands the port over at the only point where changing hands is safe.
+//
+// Two properties here are load-bearing, not stylistic:
+//
+// 1. sd_sec_read is driven by the owner flags alone, never by the consumer's
+//    request. Both consumers drop their request for exactly one cycle at each
+//    sector boundary and re-assert it with addr+1 (bmp_read ST_LOAD_DATA,
+//    sd_audio_stream S_READ), and the arbiter is idle on that very cycle.
+//    Passing the request through would let the reader latch a sector the
+//    arbiter had not granted while the grant went to the other consumer, so the
+//    grantee would ingest 512 bytes belonging to someone else.
+//
+// 2. Because sd_sec_read does not depend on the request, a granted sector
+//    always runs to its end pulse whatever the consumer does next. load_abort
+//    puts bmp_read back in ST_IDLE and a failed RIFF/WAVE check puts the
+//    streamer in S_FAULT, both with their request low; the arbiter still gets
+//    its release, so "hand over on sd_sec_read_end" is total rather than
+//    conditional on the consumer cooperating. The cost is one wasted sector,
+//    whose bytes the withdrawn owner ignores: bmp_read sits in ST_IDLE where
+//    reading_sector is false, so rd_cnt stays 0, and bmp_len_cnt only counts
+//    in ST_LOAD_DATA.
+//
+// Audio wins ties. Its 512-frame FIFO is a hard ~10.7 ms deadline -- an underrun
+// is audible silence -- while a picture loses nothing by waiting one sector for
+// its next load slot. At 48 kHz stereo 16-bit it asks for one sector per 2.67 ms
+// against a port that delivers one in roughly 184 us, so it takes about 7% of
+// the bandwidth and the picture loads barely notice.
+// ---------------------------------------------------------------------------
+always @(posedge clk or posedge rst) begin
+    if (rst || !sd_init_done) begin
+        arb_bmp_own <= 1'b0;
+        arb_aud_own <= 1'b0;
+    end else if (sd_sec_read_end) begin
+        arb_bmp_own <= 1'b0;
+        arb_aud_own <= 1'b0;
+    end else if (!arb_bmp_own && !arb_aud_own) begin
+        if (aud_sd_sec_read)
+            arb_aud_own <= 1'b1;
+        else if (bmp_sd_sec_read)
+            arb_bmp_own <= 1'b1;
+    end
+end
+
+assign sd_sec_read      = arb_bmp_own | arb_aud_own;
+assign sd_sec_read_addr = arb_aud_own ? aud_sd_sec_read_addr : bmp_sd_sec_read_addr;
+
+assign bmp_sec_data_valid = sd_sec_read_data_valid & arb_bmp_own;
+assign bmp_sec_read_end   = sd_sec_read_end        & arb_bmp_own;
+assign aud_sec_data_valid = sd_sec_read_data_valid & arb_aud_own;
+assign aud_sec_read_end   = sd_sec_read_end        & arb_aud_own;
+
 assign dbg_audio_chain  = {wav_found, audio_phase, aud_dbg_ever_we, aud_dbg_fault};
 assign dbg_gate         = {bmp_ready, ~load_busy, scan_done, display_valid};
 assign dbg_loaded_cnt   = {1'b0, img_loaded_count};
@@ -354,14 +466,22 @@ always @(posedge clk or posedge rst) begin
                 wav_size   <= scan_found_wav_size;
             end
 
-            // Hand the SD sector-read port to the music streamer only once every
-            // picture is committed and bmp_read has gone idle, so the two
-            // consumers never overlap. Sticky until reset / card-pull re-scan,
-            // which keeps music playing across the whole slideshow and the
-            // single-track loop.
-            if (!audio_phase && wav_found && bmp_ready && !load_busy &&
-                (img_loaded_count >= SCAN_TARGET_COUNT))
+            // Arm the music streamer. Under AUDIO_START_ON_FIRST_IMAGE this is
+            // the same event that raises display_valid in the load_complete_now
+            // branch below, so the picture and the track reach the panel
+            // together and the remaining pictures load in the background while
+            // it plays -- the arbiter above is what makes sharing the port
+            // mid-slideshow safe.
+            //
+            // No longer sticky until reset: it follows music_req, so MUSC 0
+            // disarms and sd_audio_stream retires to S_IDLE at its next sector
+            // boundary. Re-arming needs no picture event, because
+            // first_image_committed is itself sticky, so audio_start_now is
+            // already true the cycle music_req comes back.
+            if (!audio_phase && wav_found && audio_start_now)
                 audio_phase <= 1'b1;
+            else if (audio_phase && !music_req)
+                audio_phase <= 1'b0;
 
             if (load_busy && bmp_ready)
                 source_done_seen <= 1'b1;
@@ -540,8 +660,8 @@ bmp_read bmp_read_m0(
     .sd_sec_read            (bmp_sd_sec_read),
     .sd_sec_read_addr       (bmp_sd_sec_read_addr),
     .sd_sec_read_data       (sd_sec_read_data),
-    .sd_sec_read_data_valid (sd_sec_read_data_valid),
-    .sd_sec_read_end        (sd_sec_read_end),
+    .sd_sec_read_data_valid (bmp_sec_data_valid),
+    .sd_sec_read_end        (bmp_sec_read_end),
     .bmp_data_wr_en         (bmp_data_wr_en),
     .bmp_data               (bmp_data),
     .src_width              (bmp_src_width),
@@ -592,11 +712,12 @@ always @(posedge clk or posedge rst) begin
         dbg_aud_wr_peak <= aud_fifo_wrusedw[8:5];
 end
 
-// Music streamer. Shares the SD sector-read port with bmp_read via the mux
-// above; start is the sticky audio_phase level, so it begins only after the
-// last picture is committed and then loops the single track forever. Its FIFO
-// write side is routed straight out to the top level, where the async FIFO
-// crosses into video_clk.
+// Music streamer. Shares the SD sector-read port with bmp_read through the
+// arbiter above, one sector at a time; start is the sticky audio_phase level,
+// which under AUDIO_START_ON_FIRST_IMAGE rises with the first picture rather
+// than after the last, and then loops the single track forever. Its FIFO write
+// side is routed straight out to the top level, where the async FIFO crosses
+// into video_clk.
 sd_audio_stream #(
     .HDR_LEN                (44),
     .PAUSE_THRESH           (9'd256)
@@ -609,8 +730,8 @@ sd_audio_stream #(
     .sd_sec_read            (aud_sd_sec_read),
     .sd_sec_read_addr       (aud_sd_sec_read_addr),
     .sd_sec_read_data       (sd_sec_read_data),
-    .sd_sec_read_data_valid (sd_sec_read_data_valid),
-    .sd_sec_read_end        (sd_sec_read_end),
+    .sd_sec_read_data_valid (aud_sec_data_valid),
+    .sd_sec_read_end        (aud_sec_read_end),
     .fifo_we                (aud_fifo_we),
     .fifo_di                (aud_fifo_di),
     .fifo_wrusedw           (aud_fifo_wrusedw),

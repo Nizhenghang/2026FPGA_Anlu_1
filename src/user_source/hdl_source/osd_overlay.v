@@ -11,13 +11,16 @@ module osd_overlay #(
     input  wire        I_auto_play,
     input  wire [2:0]  I_brightness,
     input  wire [3:0]  I_state_code,
+    input  wire [3:0]  I_filt,
+    input  wire        I_font,
+    input  wire        I_asrc,             // audio source select: 0 built-in test tone, 1 TF card WAV
     output wire [23:0] O_rgb
 );
 
 localparam PANEL_X    = 14;
 localparam PANEL_Y    = 14;
 localparam PANEL_W    = 304;
-localparam PANEL_H    = 104;
+localparam PANEL_H    = 122;
 localparam TEXT_X     = 24;
 localparam TEXT_Y     = 30;
 localparam TEXT_COLS  = 16;
@@ -25,9 +28,9 @@ localparam CHAR_SCALE = 2;
 localparam CHAR_W_S   = 8 * CHAR_SCALE;
 localparam CHAR_H_S   = 8 * CHAR_SCALE;
 localparam TEXT_W     = TEXT_COLS * CHAR_W_S;
-localparam TEXT_H     = 4 * CHAR_H_S;
+localparam TEXT_H     = 5 * CHAR_H_S;
 localparam BAR_X      = 28;
-localparam BAR_Y      = 98;
+localparam BAR_Y      = 114;
 localparam BAR_W      = 120;
 localparam BAR_H      = 8;
 
@@ -63,7 +66,7 @@ wire live_dot;
 wire panel_border;
 wire [9:0] text_rel_x;
 wire [9:0] text_rel_y;
-wire [1:0] line_idx;
+wire [2:0] line_idx;
 wire [3:0] char_idx;
 wire [2:0] font_col;
 wire [2:0] font_row;
@@ -91,13 +94,13 @@ assign in_text = in_active &&
                  (y_pos >= TEXT_Y_W) && (y_pos < TEXT_Y_END);
 assign text_rel_x = x_pos - TEXT_X_W;
 assign text_rel_y = y_pos - TEXT_Y_W;
-assign line_idx = text_rel_y[5:4];
+assign line_idx = text_rel_y[6:4];
 assign char_idx = text_rel_x[7:4];
 assign font_col = text_rel_x[3:1];
 assign font_row = text_rel_y[3:1];
 assign char_code = osd_char(line_idx, char_idx, I_display_valid,
                             I_image_index, I_auto_play, I_brightness,
-                            I_state_code);
+                            I_state_code, I_filt, I_font, I_asrc);
 assign font_bits = font8x8(char_code, font_row);
 assign text_pixel = in_text && font_bits[3'd7 - font_col];
 
@@ -158,16 +161,20 @@ always @(posedge I_clk or posedge I_rst) begin
 end
 
 function [7:0] osd_char;
-    input [1:0] line;
+    input [2:0] line;
     input [3:0] idx;
     input       display_valid;
     input [1:0] image_index;
     input       auto_play;
     input [2:0] brightness;
     input [3:0] state_code;
+    input [3:0] filt;
+    input       font;
+    input       asrc;
+    reg  [39:0] name40;
     begin
         case (line)
-            2'd0: begin
+            3'd0: begin
                 case (idx)
                     4'd0: osd_char = "A";
                     4'd1: osd_char = "N";
@@ -188,7 +195,7 @@ function [7:0] osd_char;
                     default: osd_char = " ";
                 endcase
             end
-            2'd1: begin
+            3'd1: begin
                 if (display_valid) begin
                     case (idx)
                         4'd0: osd_char = "I";
@@ -228,7 +235,7 @@ function [7:0] osd_char;
                     endcase
                 end
             end
-            2'd2: begin
+            3'd2: begin
                 case (idx)
                     4'd0: osd_char = "B";
                     4'd1: osd_char = "R";
@@ -247,7 +254,14 @@ function [7:0] osd_char;
                     default: osd_char = " ";
                 endcase
             end
-            default: begin
+            3'd3: begin
+                // "HDMI AUDIO " + the live source. Exactly 16 characters, which
+                // is the whole line: char_idx is text_rel_x[7:4], so there is no
+                // room for a 17th. The old trailing "FPGA" tag gives up its four
+                // characters -- the board is still identified on line 0, and
+                // which of the two mutually exclusive audio sources is actually
+                // on the air is the far more useful thing to read off a panel
+                // that has no other way to show it.
                 case (idx)
                     4'd0: osd_char = "H";
                     4'd1: osd_char = "D";
@@ -260,13 +274,58 @@ function [7:0] osd_char;
                     4'd8: osd_char = "I";
                     4'd9: osd_char = "O";
                     4'd10: osd_char = " ";
-                    4'd11: osd_char = "F";
-                    4'd12: osd_char = "P";
-                    4'd13: osd_char = "G";
-                    4'd14: osd_char = "A";
-                    default: osd_char = " ";
+                    4'd11: osd_char = asrc ? "M" : "T";
+                    4'd12: osd_char = asrc ? "U" : "O";
+                    4'd13: osd_char = asrc ? "S" : "N";
+                    4'd14: osd_char = asrc ? "I" : "E";
+                    default: osd_char = asrc ? "C" : " ";
                 endcase
             end
+            3'd4: begin
+                // Names use only glyphs font8x8 already has. The available set is
+                // ": 0-9 A B C D E F G H I L M N O P R S T U V X Y" -- there is
+                // no J, K, Q, W or Z, which is why the passthrough filter is
+                // called "OFF" rather than "RAW" and the half-way blend toward
+                // luma is "MUTE" rather than "WASH". Codes D/E/F are reserved and
+                // fall through to "OFF  ", which is what they actually do:
+                // video_effect passes I_rgb straight through for anything it does
+                // not recognise.
+                case (filt)
+                    4'd0: name40 = "OFF  ";
+                    4'd1: name40 = "GRAY ";
+                    4'd2: name40 = "INVT ";
+                    4'd3: name40 = "THRS ";
+                    4'd4: name40 = "SEPIA";
+                    4'd5: name40 = "CNTR ";
+                    4'd6: name40 = "SATU ";
+                    4'd7: name40 = "MUTE ";
+                    4'd8: name40 = "AMBER";
+                    4'd9: name40 = "COOL ";
+                    4'd10: name40 = "SOLAR";
+                    4'd11: name40 = "POSTE";
+                    4'd12: name40 = "GINV ";
+                    default: name40 = "OFF  ";
+                endcase
+                case (idx)
+                    4'd0: osd_char = "F";
+                    4'd1: osd_char = "X";
+                    4'd2: osd_char = ":";
+                    4'd3: osd_char = name40[39:32];
+                    4'd4: osd_char = name40[31:24];
+                    4'd5: osd_char = name40[23:16];
+                    4'd6: osd_char = name40[15:8];
+                    4'd7: osd_char = name40[7:0];
+                    4'd8: osd_char = " ";
+                    4'd9: osd_char = "F";
+                    4'd10: osd_char = "O";
+                    4'd11: osd_char = "N";
+                    4'd12: osd_char = "T";
+                    4'd13: osd_char = ":";
+                    4'd14: osd_char = font ? "3" : "2";
+                    4'd15: osd_char = "D";
+                endcase
+            end
+            default: osd_char = " ";
         endcase
     end
 endfunction
@@ -585,6 +644,36 @@ function [7:0] font8x8;
                 3'd4: font8x8 = 8'b01100110;
                 3'd5: font8x8 = 8'b01100110;
                 3'd6: font8x8 = 8'b00111100;
+                default: font8x8 = 8'b00000000;
+            endcase
+            "V": case (row)
+                3'd0: font8x8 = 8'b01100110;
+                3'd1: font8x8 = 8'b01100110;
+                3'd2: font8x8 = 8'b01100110;
+                3'd3: font8x8 = 8'b01100110;
+                3'd4: font8x8 = 8'b01100110;
+                3'd5: font8x8 = 8'b00111100;
+                3'd6: font8x8 = 8'b00011000;
+                default: font8x8 = 8'b00000000;
+            endcase
+            "X": case (row)
+                3'd0: font8x8 = 8'b01100110;
+                3'd1: font8x8 = 8'b01100110;
+                3'd2: font8x8 = 8'b00111100;
+                3'd3: font8x8 = 8'b00011000;
+                3'd4: font8x8 = 8'b00111100;
+                3'd5: font8x8 = 8'b01100110;
+                3'd6: font8x8 = 8'b01100110;
+                default: font8x8 = 8'b00000000;
+            endcase
+            "Y": case (row)
+                3'd0: font8x8 = 8'b01100110;
+                3'd1: font8x8 = 8'b01100110;
+                3'd2: font8x8 = 8'b00111100;
+                3'd3: font8x8 = 8'b00011000;
+                3'd4: font8x8 = 8'b00011000;
+                3'd5: font8x8 = 8'b00011000;
+                3'd6: font8x8 = 8'b00011000;
                 default: font8x8 = 8'b00000000;
             endcase
             default: font8x8 = 8'b00000000;
