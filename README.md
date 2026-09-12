@@ -705,7 +705,7 @@ Slow / Fast 两个 corner 全部分析、全部收敛，Setup / Hold 违例端�
 - `SD/sd_audio_stream.v`：sd_card_clk 域音乐流读器，扫描定位 `MUSIC.WAV` 后跳头、组帧 {R,L}、背压、放完回卷循环，写异步 FIFO。与 `bmp_read` 共用扇区读端口，由 `sd_card_bmp.v` 的仲裁器按扇区交错，本模块自身不感知。
 - `audio_pcm_player.v`：video_clk 域 48 kHz 节拍器，小数分频取 FIFO 前瞻数据、16→24-bit 左对齐输出，欠载时持续打 valid 填 0。
 - `audio_arc_calculate.v`：每 48 个 `audio_valid` 生成一次 ACR（CTS）参数，要求 valid 为稳定 48 kHz 脉冲流。
-- `hdmi_audio_tone_i2s_64fs.v` / `I2S_receiver.v`：原 I2S 测试音与解串，已不再例化，保留在仓库便于调试回挂。
+- `hdmi_audio_tone_i2s_64fs.v` / `I2S_receiver.v`：音频**源 0**（内置测试音），**已重新例化**（`top:895` / `top:903`），是 `AUDIO_SRC_DEFAULT = 1'b0` 下的上电默认源。前者在 `audio_mclk` 域跑 DDS + ADSR 并驱动一条真实 I2S 总线，后者在 `video_clk` 把 `BCLK`/`LRCK`/`DOUT` 采回来。刻意走这一趟真实接口而不在片内直接算完：它跑通的正是接一片真 codec 时的同一套时序，也是 `audio_mclk` 与 `PLL_HDMI_AUDIO` clk2_out 存在的理由。例化**必须用模块默认参数**、不要加 `AMP` 覆盖——`tools/sim_tone_gen.py` 用正则从 RTL 解析默认参数与 LUT，一旦覆盖，模型校验的就不是板上跑的那一份。
 
 ## 备注
 
